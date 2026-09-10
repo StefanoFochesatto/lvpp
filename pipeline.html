@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>From PDE to Solver: the LVPP pipeline</title>
+<script>
+window.MathJax = {tex: {inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$']]}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+<style>
+body { font-family: Georgia, 'Times New Roman', serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.6; color: #1a1a1a; background: #fdfcf9; }
+h1 { font-size: 1.7em; border-bottom: 3px solid #8b1e1e; padding-bottom: .3em; }
+h2 { font-size: 1.3em; border-bottom: 1px solid #c9b8a8; padding-bottom: .2em; margin-top: 1.9em; }
+h3 { font-size: 1.08em; margin-top: 1.4em; }
+p { margin: .7em 0; }
+table { border-collapse: collapse; margin: 1em 0; font-size: .95em; }
+th, td { border: 1px solid #b7a98f; padding: 4px 10px; text-align: center; }
+th { background: #efe7d7; }
+td:first-child, th:first-child { text-align: left; }
+code { background: #f1ede3; padding: 1px 5px; border-radius: 3px; font-size: .92em; }
+pre { background: #f4efe6; border: 1px solid #d8cbb2; border-radius: 6px; padding: 10px 14px; overflow-x: auto; font-size: .87em; line-height: 1.5; }
+.meta { color: #666; font-size: .9em; }
+figure { margin: 1.5em 0; text-align: center; }
+figcaption { font-size: .88em; color: #555; margin-top: 6px; }
+.step { background: #fff; border: 2px solid #8b1e1e; border-radius: 10px; padding: 4px 18px 14px; margin: 1.3em 0; }
+.step h2 { border-bottom: none; margin-top: .4em; color: #8b1e1e; }
+.stepno { display: inline-block; background: #8b1e1e; color: #fff; border-radius: 6px; padding: 1px 10px; margin-right: 8px; font-size: .95em; }
+svg { max-width: 100%; height: auto; }
+.warn { background: #fbeeea; border-left: 5px solid #a33c2e; padding: 8px 14px; margin: 1em 0; }
+.note { background: #eef4ec; border-left: 5px solid #3c7a3c; padding: 8px 14px; margin: 1em 0; }
+</style>
+</head>
+<body>
+
+<h1>From the PDE to the linear solver: the LVPP pipeline, end to end</h1>
+<p class="meta">Companion to <code>lvpp/report.html</code> (findings) and <code>lvpp/RESEARCH.md</code> (lab
+notebook). This document is the <em>pedagogical</em> one: it walks the full path from the constrained
+PDE in the LVPP paper to the finite-element discretization we run to the exact linear-solver
+configuration that survived testing. Every measured claim carries its number.</p>
+
+<div class="step">
+<h2><span class="stepno">Step 0</span> The problem: a variational inequality dressed as a PDE</h2>
+<p>Model problem (the sphere benchmark): find \(u\) on \(\Omega = (0,2)^2\) (with prescribed
+boundary data \(u = u_D\)) such that</p>
+$$
+-\Delta u = f \quad \text{in } \Omega, \qquad u \ge \psi \ \text{ a.e. in } \Omega .
+$$
+<p>This is a <em>variational inequality</em>: an elliptic PDE plus a pointwise inequality constraint.
+The classical strong form carries a Lagrange-type multiplier \(\Lambda \le 0\) supported on the
+contact set:</p>
+$$
+-\Delta u - f = \Lambda, \qquad \Lambda \le 0, \qquad \Lambda\,(u - \psi_{\mathrm{obs}}) = 0, \qquad u \ge \psi_{\mathrm{obs}} .
+$$
+<p>Complementarity — the product \(\Lambda (u-\psi_{\mathrm{obs}}) = 0\) — is what makes this hard:
+it is a nonsmooth, combinatorial object. Classical solvers resolve it by
+<em>deciding</em>, each Newton iteration, which nodes are active (<code>vinewtonrsls</code>: active rows
+are replaced by the constraint equation — the operator's structure mutates). That mutation is what
+a matrix-free/QFunction library cannot express. LVPP's wager: reparametrize the constraint as a
+smooth map so the operator never changes.</p>
+
+<p>For generality it matters that the LVPP formulation does <em>not</em> require an energy: the
+general form is a constrained nonlinear PDE system</p>
+$$
+\mathcal{F}(u) = 0 \ \text{ in } \Omega, \qquad c(u) \ge 0 \ \text{ pointwise},
+$$
+<p>with \(c\) handled through a Legendre duality pair (a "Legendre function" \(\mathcal{R}\) whose
+gradient map \(\nabla\mathcal{R}^{*}\) parametrizes the feasible set). Our implementation keeps this
+surface: <code>lvpp/legendre.py</code> holds the families (ShannonLower/Upper, FermiDirac, Hellinger,
+GibbsSimplex) and <code>constraints.py</code> exposes the family-generic interface
+(<code>coupling_form</code>, <code>state_form</code>, <code>observable</code>) — the same surface the
+saddle estimator (Finding 3) is built on.</p>
+</div>
+
+<div class="step">
+<h2><span class="stepno">Step 1</span> The latent-variable saddle system (continuous)</h2>
+<p>For the unilateral lower bound \(u \ge \psi_{\mathrm{obs}}\), the Shannon-type family gives the
+exponential slack: the gap is written as</p>
+$$
+g := u - \psi_{\mathrm{obs}} = e^{\phi}, \qquad \phi \in \mathbb{R}\ \text{ unconstrained} .
+$$
+<p>Feasibility for <em>any</em> \(\phi\), by construction. The inequality is gone; what remains is a
+<em>saddle-point system</em> in \((u, \phi)\). Because the raw system inherits the complementarity
+kink, LVPP solves a sequence of <em>proximal</em> subproblems: given the previous latent iterate
+\(\phi_k\) and parameter \(\alpha_k\), find \((u_{k+1}, \phi_{k+1})\) such that</p>
+$$
+\begin{aligned}
+\text{(momentum row)} &\qquad \mathcal{A}(u) - f + \Lambda(\phi) = 0,\\
+\text{(constraint row)} &\qquad M\,(u - \psi_{\mathrm{obs}}) - M\,e^{\phi} + \text{prox}_{\alpha_k}(\phi;\phi_k) = 0 .
+\end{aligned}
+$$
+<p>The two-row structure is the paper's eq. (2.7) in its discrete-friendly form: a PDE row carrying
+the contact force \(\Lambda\) (which converges to the physical multiplier — the "drift" we measure
+is exactly \(\lambda_k = (\phi_{k-1}-\phi_k)/\alpha_k\), [PG] Thm 4.13), and a constraint row
+that substitutes the exponential slack and adds the Bregman proximal term.</p>
+
+<figure>
+<svg viewBox="0 0 660 210" xmlns="http://www.w3.org/2000/svg">
+  <rect x="10" y="30" width="190" height="80" fill="#f6dcdc" stroke="#b03a2e" stroke-width="2" rx="8"/>
+  <text x="105" y="60" text-anchor="middle" font-size="13" font-weight="bold">VI + complementarity</text>
+  <text x="105" y="80" text-anchor="middle" font-size="11">Λ ≤ 0, Λ·g = 0 — combinatorial</text>
+  <text x="105" y="98" text-anchor="middle" font-size="12">the thing matfree cannot encode</text>
+
+  <rect x="240" y="30" width="190" height="80" fill="#fff3e0" stroke="#8b6e1e" stroke-width="2" rx="8"/>
+  <text x="335" y="58" text-anchor="middle" font-size="13" font-weight="bold">slack map g = e^φ</text>
+  <text x="335" y="78" text-anchor="middle" font-size="12">constraint holds for ANY φ</text>
+  <text x="335" y="76" text-anchor="middle" font-size="12"> </text>
+  <text x="335" y="98" text-anchor="middle" font-size="12">smooth, unconstrained φ ∈ ℝ</text>
+
+  <rect x="470" y="30" width="180" height="80" fill="#dbe9d9" stroke="#3c7a3c" stroke-width="2" rx="8"/>
+  <text x="560" y="58" text-anchor="middle" font-size="13" font-weight="bold">proximal regularization</text>
+  <text x="560" y="78" text-anchor="middle" font-size="12">(1/α_k)·(φ − φ_k) driving term</text>
+  <text x="560" y="98" text-anchor="middle" font-size="12">α_k ↑, well-posed subproblems</text>
+
+  <line x1="200" y1="70" x2="240" y2="70" stroke="#555" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="430" y1="70" x2="470" y2="70" stroke="#555" stroke-width="1.5" marker-end="url(#a1)"/>
+  <text x="105" y="130" text-anchor="middle" font-size="11" fill="#888">complementarity kink</text>
+  <text x="330" y="130" text-anchor="middle" font-size="11" fill="#888">log reparametrization</text>
+  <text x="560" y="130" text-anchor="middle" font-size="11" fill="#888">Bregman proximity</text>
+
+  <defs>
+    <marker id="a1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#555"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>Fig. A — The two transformations between the VI and the solvable system.
+The slack map is what removes row mutation; the proximity term is what keeps the
+resulting subproblems well-posed as φ dives.</figcaption>
+</figure>
+
+<p>The α-sequence is the double-exponential rule of the reference implementation
+(<code>C = 1, r = 1.5, q = 1.5</code>, capped at <code>α_max = 10</code>): α doubles per proximal
+step early on, and the number of proximal iterations is mesh-independent (measured 8/11/8/8/8 —
+Newton totals 21/23/19/20/21).</p>
+</div>
+
+<div class="step">
+<h2><span class="stepno">Step 2</span> Finite-element discretization</h2>
+<p>Both unknowns use <strong>equal-order continuous piecewise-linear</strong> elements on the same
+mesh — the proximal-Galerkin choice:</p>
+$$
+V_h = W_h = \{ \text{P1 Lagrange on } \mathcal{T}_h \}, \qquad
+z = (u_h, \phi_h) \in V_h \times W_h .
+$$
+<p>Everything is assembled through the family-generic residual interface. In our
+<code>lvpp</code> implementation the two rows are, symbolically,</p>
+<pre>
+row 1 (u):   ∫ ∇u·∇v dx  −  ∫ Λ(φ) v dx      =  ∫ f v dx     (momentum + contact force)
+row 2 (φ):   ∫ (u − ψ_obs − e^φ) w dx  +  prox(φ; φ_k, α_k) = 0     (constraint + regularization)
+</pre>
+<p>where \(\Lambda(\phi)\) is delivered by the Legendre dual of the chosen family — for
+<code>ShannonLower</code> (the lower-bound family used on the sphere) the dual map produces the
+\(e^{\phi}\)-weighted terms in both rows. Linearizing gives the block Jacobian</p>
+$$
+J \;=\;
+\begin{bmatrix}
+K & B \\[2pt]
+M & D
+\end{bmatrix},
+\qquad
+\begin{aligned}
+K &= \alpha\,(\text{P1 stiffness}) + \text{(proximal terms on } u\text{)} &&\text{SPD}\\
+B &= M &&\text{mass coupling}\\
+D &= -\,M \odot e^{\phi_h} + \partial_\phi\,\text{prox} &&\text{scaled mass — degenerate}
+\end{aligned}
+$$
+<p>and this is where the continuous trick leaves its mark: differentiating \(e^{\phi_h}\) brings the
+factor \(e^{\phi_h}\) into the latent block, so wherever the gap \(u - \psi_{\mathrm{obs}}\) closes,
+the diagonal of \(D\) decays like \(e^{\phi}\). The proximal term adds an \(O(1/\alpha_k)\)-scaled
+healthy bulk on top. Measured at a converged deep state (L2): diagonal entries of \(D\) span
+\(10^{-28}\)…\(10^{-2}\); 749 rows are below \(10^{-12}\).</p>
+
+<figure>
+<svg viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="180" height="200" fill="#f7f4ee" stroke="#999" rx="8"/>
+  <text x="110" y="45" text-anchor="middle" font-size="13" font-weight="bold">P1 mesh, one cell</text>
+  <polygon points="60,70 170,60 140,180" fill="#e8e0ee" stroke="#6a4a8c" stroke-width="1.5"/>
+  <circle cx="170" cy="60" r="4" fill="#6a4a8c"/>
+  <circle cx="140" cy="180" r="4" fill="#6a4a8c"/>
+  <circle cx="80" cy="110" r="4" fill="#6a4a8c"/>
+  <text x="110" y="205" text-anchor="middle" font-size="11">CG1: 3 dofs/cell, shared across cells</text>
+  <text x="110" y="222" text-anchor="middle" font-size="11">DG1 (broken): per-cell copies — basis of the per-cell Sp</text>
+
+  <rect x="230" y="40" width="380" height="150" fill="#fff" stroke="#8b1e1e" stroke-width="2" rx="6"/>
+  <text x="420" y="65" text-anchor="middle" font-size="13" font-weight="bold">Assembled latent diagonal D (measured, L2 converged)</text>
+  <text x="250" y="95" font-size="12">healthy bulk:  O(1/α)·h² ≈ 10⁻²   (inactive region)</text>
+  <text x="250" y="120" font-size="12" fill="#b03a2e">dead tail:     e^φ → 10⁻²⁸…10⁻⁸⁰  (contact interior)</text>
+  <text x="250" y="145" font-size="12">749 rows below 10⁻¹²  of 8321  (9% of dofs, uniform)</text>
+  <text x="250" y="145" font-size="12"> </text>
+  <text x="250" y="168" font-size="11" fill="#555">off-diagonals: D is a SCALED MASS, not diagonal (off-diag O(median diag))</text>
+  <line x1="240" y1="100" x2="600" y2="100" stroke="#ccc" stroke-width="1"/>
+  <line x1="240" y1="112" x2="600" y2="112" stroke="#b03a2e" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="612" y="104" font-size="11" text-anchor="start">ε-floor band</text>
+</svg>
+<figcaption>Fig. B — From cells to the Jacobian: equal-order P1 spaces, per-cell assembly, and the
+shape of the assembled latent diagonal. The "dead tail" is where e^φ underflows; the h-fair census
+is ψ &lt; log(1e-8) (gap = e^ψ exactly nodally).</figcaption>
+</figure>
+</div>
+
+<div class="step">
+<h2><span class="stepno">Step 2</span> The nonlinear outer loop: proximal point + Newton</h2>
+<p>The proximal loop is nonnegotiable structure: α_k grows (double-exponential rule,
+α_max = 10), each subproblem is solved by Newton, and the discrete multiplier/drift
+\(\lambda = (\phi_{k-1} - \phi_k)/\alpha_k\) converges to the contact force ([PG] Thm 4.13).
+Measured through L4: proximal iterations 8/11/8/8/8, Newton 21/23/19/20/21 — <strong>mesh-independent</strong>,
+and identical to assembled-LU references. Each Newton step needs one linear solve with J above;
+this is where all the difficulty lives.</p>
+
+<div class="note">
+<p><strong>Operator design rule (measured, Finding 1):</strong> the system rows never mutate —
+the fixed-pattern matrix is exactly the libCEED compatibility argument. And the proximal dynamics
+require <em>exact Newton steps</em>: regularizing the true operator J (ψ_floor_operator) fails at
+every level, while preconditioner-side modifications leave the proximal map intact.</p>
+</div>
+</div>
+
+<div class="step">
+<h2><span class="stepno">Step 3</span> Inside Newton: outer GMRES on a matfree operator</h2>
+<p>Each Newton linear solve is a Krylov solve with a <strong>matrix-free</strong> operator: the
+matfree action of J applies pointwise kernels (e^φ, e^{2φ}, (λ/α)e^φ factors) with fixed sparsity —
+no row mutation, ever. Verified bit-exact against assembled references through the full loop
+(Finding 1: 8/21, 11/23 at L0/L1 iteratively identical). The preconditioner, however, is built
+from the <em>assembled</em> Pmat (firedrake assembles Jp; the matfree operator cannot be block-split).</p>
+
+<figure>
+<svg viewBox="0 0 660 240" xmlns="http://www.w3.org/2000/svg">
+  <rect x="15" y="15" width="630" height="210" fill="none" stroke="#333" stroke-width="1.5" rx="6"/>
+  <text x="330" y="38" text-anchor="middle" font-size="15" font-weight="bold">One linear solve, final configuration</text>
+
+  <rect x="30" y="60" width="150" height="55" fill="#dbe9d9" stroke="#3c7a3c" stroke-width="2" rx="6"/>
+  <text x="95" y="62" text-anchor="middle" font-size="12" font-weight="bold">outer GMRES/FGMRES</text>
+  <text x="95" y="80" text-anchor="middle" font-size="11">rtol 1e-6, restart 250</text>
+  <text x="95" y="97" text-anchor="middle" font-size="11">multiplies matfree J only</text>
+  <text x="95" y="114" text-anchor="middle" font-size="11" fill="#555">→ no row mutation, ever</text>
+
+  <rect x="215" y="55" width="205" height="100" fill="#fff7e6" stroke="#8b6e1e" stroke-width="2" rx="6"/>
+  <text x="317" y="78" text-anchor="middle" font-size="12" font-weight="bold">PC: block-UL on Pmat</text>
+  <text x="317" y="100" text-anchor="middle" font-size="12">y₁ = K⁻¹ r₁</text>
+  <text x="317" y="120" text-anchor="middle" font-size="12">y₂ = Sₚ⁻¹(r₂ − M y₁)</text>
+  <text x="317" y="142" text-anchor="middle" font-size="11" fill="#555">Pmat = assembled, ψ_floor = 0</text>
+
+  <rect x="470" y="40" width="175" height="60" fill="#dbe9d9" stroke="#3c7a3c" stroke-width="2" rx="6"/>
+  <text x="557" y="60" text-anchor="middle" font-size="11" font-weight="bold">K-solve: preonly + MUMPS</text>
+  <text x="557" y="78" text-anchor="middle" font-size="11">exact; CG+GAMG measured as</text>
+  <text x="557" y="94" text-anchor="middle" font-size="11">wall loser (1.6×→3.8×)</text>
+
+  <rect x="470" y="120" width="175" height="80" fill="#dce7f5" stroke="#2e5e9e" stroke-width="2" rx="6"/>
+  <text x="557" y="140" text-anchor="middle" font-size="12" font-weight="bold">Sₚ-solve:</text>
+  <text x="557" y="158" text-anchor="middle" font-size="11">selfp: preonly+MUMPS on</text>
+  <text x="557" y="94" text-anchor="middle" font-size="11"> </text>
+  <text x="557" y="158" text-anchor="middle" font-size="11">Sp = D − M diag(K)⁻¹Mᵀ</text>
+  <text x="557" y="178" text-anchor="middle" font-size="11">or (graded): inner Krylov on −S</text>
+
+  <line x1="160" y1="100" x2="213" y2="100" stroke="#333" marker-end="url(#a2)"/>
+  <line x1="420" y1="85" x2="468" y2="72" stroke="#333" marker-end="url(#a2)"/>
+  <line x1="420" y1="120" x2="468" y2="150" stroke="#333" marker-end="url(#a2)"/>
+
+  <defs>
+    <marker id="a2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#333"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>Fig. C — The production solver. Two exact solves per PC application (K-block, Sp),
+GMRES on the outside absorbing the diag(K)⁻¹-vs-K⁻¹ approximation error. The dashed variant swaps
+the Sp LU for the matfree true-S action with capped inner Krylov — the graded-mesh fix.</figcaption>
+</figure>
+
+<h3>Why ψ_floor = 0</h3>
+<p>The floor (ε·mass on the latent block of the Pmat) was our stabilization for an earlier additive
+configuration whose latent solve divided by machine-zero. The decomposition experiments isolated its
+cost precisely: an exact block-LU PC with <em>unfloored</em> S⁻¹ gives outer GMRES its = 1 flat at
+every depth, while the floored variant reproduces the whole growth curve (145/895/1000-diverged) —
+the ε·mass differs from the operator by O(ε) on a subspace of growing dimension. On the Schur path
+the latent block is never inverted: Sp = D − M·diag(K)⁻¹·Mᵀ is nonsingular without any floor (the
+coupling carries the dead rows). End-to-end ψ_floor = 0 is LU-identical with max outer its
+14/29/48 vs 45/130–560/400–926 floored. The floor remains necessary only on additive/diagonal-
+inversion paths; the ε-ladder maps its safety band (≤ 1e-5 safe, 1e-4 knife-edge, ≥ 1e-3 kills L2).</p>
+</div>
+
+<div class="step">
+<h2><span class="stepno">Step 4</span> The Schur complement: why this configuration works</h2>
+<p>Block elimination of the healthy u-block leaves the latent Schur complement</p>
+$$
+S \;=\; D - M^{\top}K^{-1}M ,
+$$
+<p>and the measured spectral anatomy is the heart of the whole story: <strong>S never
+degenerates</strong>. On the contact interior D contributes ~0, and S there is carried entirely by
+the coupling \(-M^{\top}K^{-1}M\) — the smoothing operator, which stays strictly negative definite
+with \(\lambda_{S,\min} \sim -c\,h^{2}\) (pure h² scaling, α-independent, no near-null cluster:
+0/1/1 across levels). The dead latent rows of <em>J</em> are numerically harmless to a solver that
+approximates S through the coupling — they are lethal only to a preconditioner that inverts D
+directly (which is why additive fieldsplit needed the floor and Schur does not).</p>
+
+<figure>
+<svg viewBox="0 0 660 240" xmlns="http://www.w3.org/2000/svg">
+  <rect x="15" y="15" width="300" height="210" fill="#eef4ec" stroke="#3c7a3c" stroke-width="2" rx="6"/>
+  <text x="165" y="42" text-anchor="middle" font-size="14" font-weight="bold">Schur-path view</text>
+  <text x="165" y="66" text-anchor="middle" font-size="12">Sp = D − M diag(K)⁻¹Mᵀ</text>
+  <text x="165" y="88" text-anchor="middle" font-size="12">dead rows of D: contribute ~0;</text>
+  <text x="165" y="106" text-anchor="middle" font-size="12">−M diag(K)⁻¹Mᵀ carries them</text>
+  <text x="165" y="128" text-anchor="middle" font-size="12">‖Sp − S‖/‖S‖ ~ 1.6e-3 even at 45.6× grading</text>
+  <text x="165" y="150" text-anchor="middle" font-size="12">no floor needed — dead rows never inverted</text>
+  <text x="165" y="172" text-anchor="middle" font-size="12" fill="#2e7d32">result: LU-identical solves, its 14/29/48/105/329</text>
+  <text x="165" y="196" text-anchor="middle" font-size="12" fill="#555">(this is the production config)</text>
+
+  <rect x="345" y="15" width="300" height="210" fill="#fbeeea" stroke="#b03a2e" stroke-width="2" rx="6"/>
+  <text x="495" y="42" text-anchor="middle" font-size="14" font-weight="bold">Additive-path view (why the floor existed)</text>
+  <text x="495" y="66" text-anchor="middle" font-size="12">latent solve inverts diag(D): 1/10⁻⁷⁰ → Inf</text>
+  <text x="495" y="88" text-anchor="middle" font-size="12">floor keeps it alive — but costs O(ε) mismatch</text>
+  <text x="495" y="110" text-anchor="middle" font-size="12">on a transition band of rank ≥ 70/241/829</text>
+  <text x="495" y="132" text-anchor="middle" font-size="12" fill="#b03a2e">→ the entire outer-GMRES growth curve</text>
+  <text x="495" y="154" text-anchor="middle" font-size="12">rank-k correction, active-set patching,</text>
+  <text x="495" y="172" text-anchor="middle" font-size="12">graded-aware diag variants: all measured worse</text>
+  <text x="495" y="196" text-anchor="middle" font-size="12" fill="#b03a2e">floor deleted on the Schur path</text>
+</svg>
+<figcaption>Fig. D — The two paths to the same operator. The Schur path never touches the
+degenerate diagonal; the additive path cannot avoid it. The refutation ladder (per-cell coupling
+subdominant at O(h⁴); rank-k not curable — transition-band rank exceeds dead count; diag(K)⁻¹
+grading mismatch refuted at 3.3e3→8.9e3) shows why the floor was both necessary and, once the
+Schur structure is used, deletable.</figcaption>
+</figure>
+</div>
+
+<div class="step">
+<h2><span class="stepno">Step 4b</span> Graded meshes: the matfree S-action variant</h2>
+<p>On adaptive (band) meshes the selfp approximation degrades (outer its up to 323, and a
+DIVERGED_BREAKDOWN at 14k dofs). The fix keeps the same block-UL structure but replaces the Sp
+solve by the <em>true</em> Schur action applied matrix-free via the triple product</p>
+$$
+S\,v \;=\; D\,v \;-\; B^{\top}\big(K^{-1}(B\,v)\big),
+$$
+<p>with each K⁻¹ application an exact MUMPS solve, and the (now variable-iteration) Schur solve
+done by a capped inner Krylov method on \(-S\) (rtol 1e-4, cap 40, Jacobi-scaled; outer FGMRES
+because the Schur apply is now iteration-varying). End-to-end on the band chain:</p>
+<ul>
+<li>band_l4 (3613 dofs, grading 22.8×): max outer its <strong>161</strong> vs 297 (selfp); deep proximal steps 297 → 4–5 its.</li>
+<li>band_l5 (45.6×): <strong>solves</strong> 8/17, err 4.995e-03, max 188 vs 323 (selfp).</li>
+<li>band_l6 (14,245 dofs): every linear solve CONVERGED_RTOL where selfp production <em>diverged</em>
+(ksp = −5) — the graded-mesh failure is eliminated.</li>
+</ul>
+<p>Costs, measured honestly: on <em>uniform</em> meshes variant B is ~4.5× slower than selfp
+(the first, coldest Newton solve pays 62–70 its) — its value is grading-robustness, not uniform
+speed. And with inner CG, one stall was observed (band_l5 proximal increment plateau with all
+linear solves at 4–5 its): the capped inexact Schur action perturbs the Newton matrix within
+tolerance; the identical chain with <strong>inner GMRES</strong> solves band_l5 in 8 prox steps.
+The S-action assumes no symmetry, so for non-potential families (convection, q-Laplacian) the
+same structure holds with the inner method's name changed from CG to GMRES.</p>
+
+<div class="note">
+<p><strong>Family generality.</strong> The matfree triple product assumes no symmetry. For the
+symmetric/energy case −S is SPD (strictly negative S, h²-scaled) and CG is the efficient inner
+choice; for non-potential \(\mathcal{F}\) (convection, q-Laplacian), S becomes nonsymmetric and the
+inner method becomes GMRES/MINRES with the same tolerance/cap discipline. The architecture —
+fixed-pattern operator, Schur-block treatment, proximal outer loop — is unchanged; only the inner
+method's name and the loss of the spectral bound are family-dependent.</p>
+</div>
+</div>
+
+<div class="step">
+<h2><span class="stepno">Step 5</span> The complete picture</h2>
+
+<figure>
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="a3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#333"/>
+    </marker>
+  </defs>
+  <rect x="30" y="20" width="150" height="70" fill="#f6dcdc" stroke="#b03a2e" rx="6"/>
+  <text x="105" y="48" text-anchor="middle" font-size="12" font-weight="bold">VI / constrained PDE</text>
+  <text x="105" y="66" text-anchor="middle" font-size="11">−Δu − f = Λ, Λ(u−ψ)=0</text>
+  <text x="105" y="80" text-anchor="middle" font-size="11">complementarity</text>
+
+  <rect x="30" y="130" width="150" height="70" fill="#fff3e0" stroke="#8b6e1e" rx="6"/>
+  <text x="105" y="158" text-anchor="middle" font-size="12" font-weight="bold">LVPP saddle system</text>
+  <text x="105" y="176" text-anchor="middle" font-size="11">momentum + constraint row</text>
+  <text x="105" y="190" text-anchor="middle" font-size="11">e^φ slack, prox_α</text>
+
+  <rect x="30" y="240" width="150" height="70" fill="#fff3e0" stroke="#8b6e1e" rx="6"/>
+  <text x="105" y="268" text-anchor="middle" font-size="12" font-weight="bold">FE discretization</text>
+  <text x="105" y="286" text-anchor="middle" font-size="11">equal-order P1 × P1</text>
+  <text x="105" y="300" text-anchor="middle" font-size="11">K, B=M, D=−M⊙e^φ</text>
+
+  <rect x="30" y="330" width="150" height="60" fill="#f0f0f0" stroke="#777" rx="6"/>
+  <text x="105" y="355" text-anchor="middle" font-size="12" font-weight="bold">proximal loop</text>
+  <text x="105" y="372" text-anchor="middle" font-size="11">α_k doubles, mesh-independent</text>
+
+  <rect x="260" y="130" width="170" height="70" fill="#dbe9d9" stroke="#3c7a3c" rx="6"/>
+  <text x="345" y="158" text-anchor="middle" font-size="12" font-weight="bold">Newton (exact)</text>
+  <text x="345" y="176" text-anchor="middle" font-size="11">21/23/19 — LU-identical</text>
+  <text x="345" y="190" text-anchor="middle" font-size="11">no mutation ever</text>
+
+  <rect x="260" y="240" width="170" height="110" fill="#fff7e6" stroke="#8b6e1e" rx="6"/>
+  <text x="345" y="266" text-anchor="middle" font-size="12" font-weight="bold">outer GMRES (matfree J)</text>
+  <text x="345" y="288" text-anchor="middle" font-size="11">rtol 1e-6, restart 250</text>
+  <text x="345" y="288" text-anchor="middle" font-size="11"> </text>
+  <text x="345" y="306" text-anchor="middle" font-size="11" fill="#555">uniform: 14/29/48/105/329</text>
+  <text x="345" y="330" text-anchor="middle" font-size="11" fill="#555">graded: → inner-S variant</text>
+
+  <rect x="480" y="130" width="170" height="100" fill="#dbe9d9" stroke="#3c7a3c" rx="6"/>
+  <text x="565" y="156" text-anchor="middle" font-size="12" font-weight="bold">K-block</text>
+  <text x="565" y="176" text-anchor="middle" font-size="11">preonly + MUMPS (exact)</text>
+  <text x="565" y="192" text-anchor="middle" font-size="11">CG+GAMG: correct but</text>
+  <text x="565" y="208" text-anchor="middle" font-size="11">wall loser (1.6→3.8×)</text>
+
+  <rect x="480" y="250" width="170" height="120" fill="#dce7f5" stroke="#2e5e9e" rx="6"/>
+  <text x="565" y="276" text-anchor="middle" font-size="12" font-weight="bold">Schur block</text>
+  <text x="565" y="296" text-anchor="middle" font-size="11">uniform: LU of selfp Sp</text>
+  <text x="565" y="312" text-anchor="middle" font-size="11">graded: matfree S = D − BᵀK⁻¹B</text>
+  <text x="565" y="328" text-anchor="middle" font-size="11">+ inner GMRES on −S</text>
+  <text x="565" y="344" text-anchor="middle" font-size="11">(rtol 1e-4, cap ~40)</text>
+  <text x="565" y="362" text-anchor="middle" font-size="11">CG when −S SPD (symmetric case)</text>
+
+  <line x1="105" y1="90" x2="105" y2="128" stroke="#555" marker-end="url(#a3)"/>
+  <line x1="105" y1="200" x2="105" y2="238" stroke="#555" marker-end="url(#a3)"/>
+  <line x1="180" y1="275" x2="258" y2="275" stroke="#555" marker-end="url(#a3)"/>
+  <line x1="260" y1="175" x2="260" y2="238" stroke="#555" marker-end="url(#a3)"/>
+  <line x1="430" y1="265" x2="478" y2="265" stroke="#555" marker-end="url(#a3)" transform="translate(0,40)"/>
+  <line x1="430" y1="270" x2="478" y2="170" stroke="#555" marker-end="url(#a3)"/>
+
+  <text x="340" y="390" text-anchor="middle" font-size="12" fill="#555">Measured: LU-identical solves L0→L4 (545→132k dofs), O(h²) errors, growth N^0.8, graded fix at 6/10/15 cold its</text>
+</svg>
+<figcaption>Fig. E — The full pipeline. Each arrow is one of this document's steps; the measured
+anchors (iteration counts, dofs, errors) are the numbers of the findings report.</figcaption>
+</figure>
+</div>
+
+<div class="boxed">
+<h3 style="margin-top:.2em">Summary card</h3>
+<table>
+<tr><th>stage</th><th>object</th><th>status (measured)</th></tr>
+<tr><td>PDE</td><td>elliptic VI: −Δu − f = Λ, complementarity</td><td>generalizes to residual form; non-potential families OK</td></tr>
+<tr><td>continuous reformulation</td><td>slack g = e^φ, dual row, Bregman prox (α_k)</td><td>the λ-identity: drift = discrete multiplier</td></tr>
+<tr><td>discretization</td><td>equal-order P1×P1; J = [[K,B],[M,D]]</td><td>blocks verified: B = M; D = −M⊙e^φ; κ(D-tail) = 10⁻²⁸…10⁻⁸⁰</td></tr>
+<tr><td>nonlinear solve</td><td>proximal loop + Newton</td><td>mesh-independent (8 prox / 21 Newton, LU-identical)</td></tr>
+<tr><td>linear solve (uniform)</td><td>matfree J + floorless Schur selfp + MUMPS</td><td>LU-identical to 132k dofs; outer its ~N^0.8</td></tr>
+<tr><td>linear solve (graded)</td><td>matfree S-action + inner GMRES on −S</td><td>blowup 297/323 → 161/188; l6 divergence eliminated</td></tr>
+<tr><td>parallel</td><td>2-rank smoke</td><td>correctness PASS (LU-identical); wall datum deferred</td></tr>
+</table>
+</div>
+
+<p class="meta">Scripts of record: <code>lvpp/experiments/{eps_schedule, growth_driver, rankk_correction, schur_probe, schur_percell, spectrum_anatomy, scale_up, amr_health, par_smoke, grade_pc, promob}.py</code>.
+Lab notebook: <code>lvpp/RESEARCH.md</code>. Findings companion: <code>lvpp/report.html</code>.</p>
+
+</body>
+</html>

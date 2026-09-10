@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Matrix-Free LVPP: Findings Report</title>
+<script>
+window.MathJax = {tex: {inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$']]}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+<style>
+body { font-family: Georgia, 'Times New Roman', serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.55; color: #1a1a1a; background: #fdfcf9; }
+h1 { font-size: 1.7em; border-bottom: 3px solid #8b1e1e; padding-bottom: .3em; }
+h2 { font-size: 1.3em; border-bottom: 1px solid #c9b8a8; padding-bottom: .2em; margin-top: 1.8em; }
+h3 { font-size: 1.1em; margin-top: 1.4em; }
+table { border-collapse: collapse; margin: 1em 0; font-size: .95em; }
+th, td { border: 1px solid #b7a98f; padding: 4px 10px; text-align: center; }
+th { background: #efe7d7; }
+td:first-child, th:first-child { text-align: left; }
+code { background: #f1ede3; padding: 1px 5px; border-radius: 3px; font-size: .92em; }
+pre { background: #f4efe6; border: 1px solid #d8cbb2; border-radius: 6px; padding: 10px 14px; overflow-x: auto; font-size: .88em; line-height: 1.45; }
+.verdict { background: #eef4ec; border-left: 5px solid #3c7a3c; padding: 10px 16px; margin: 1em 0; }
+.negative { background: #fbeeea; border-left: 5px solid #a33c2e; margin: 1em 0; padding: 8px 14px; }
+figure { margin: 1.4em 0; text-align: center; }
+figcaption { font-size: .88em; color: #555; margin-top: 6px; }
+.meta { color: #666; font-size: .9em; }
+.boxed { border: 2px solid #8b1e1e; border-radius: 8px; padding: 12px 18px; margin: 1.2em 0; background: #fff; }
+.tag-ok { color: #2e7d32; font-weight: bold; }
+.tag-bad { color: #b03a2e; font-weight: bold; }
+svg { max-width: 100%; height: auto; }
+</style>
+</head>
+<body>
+
+<h1>Matrix-Free LVPP: Measured Findings</h1>
+<p class="meta">Session report, 2026-09-03 → 09-10. All numbers measured on the sphere obstacle benchmark
+(direct LU references verified at every level); harness scripts under <code>lvpp/experiments/</code>;
+full lab notebook in <code>RESEARCH.md</code>. Where a headline number was used, it was reproduced
+independently before being recorded.</p>
+
+<h2>1. The system and its block structure</h2>
+<p>LVPP reparameterizes the obstacle constraint \(g = u - \psi_{\mathrm{obs}} \ge 0\) as \(g = e^{\phi}\)
+with a latent field \(\phi \in \mathbb{R}\) (unconstrained), then regularizes via Bregman proximal
+point with parameter \(\alpha_k\). One Newton linearization at a deep proximal state is the
+\(2\times 2\) block system</p>
+$$
+J \;=\; \begin{bmatrix} K & B \\ B^{\top} & D \end{bmatrix},
+\qquad
+\begin{aligned}
+K &= \alpha\,(\text{stiffness}) &&\text{(SPD, scales with } \alpha\text{)}\\
+B &= M \quad\text{(mass matrix)} &&\\
+D &= -\,M \odot e^{\phi} \quad &&\text{(scaled mass — the degenerate block)}
+\end{bmatrix}
+$$
+<p>Nothing here is symmetric-positive-definite overall, but every block has known character: \(K\)
+is elliptic-like (healthy), \(B\) is plain mass (healthy), and the entire degeneracy is localized
+in \(D\): on the contact interior \(e^{\phi}\) underflows (\(\phi \to -318\ldots-763\)) and diagonal
+entries collapse by 60+ orders of magnitude.</p>
+
+<figure>
+<svg viewBox="0 0 640 250" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="230" height="150" fill="#dbe9d9" stroke="#3c7a3c" stroke-width="2"/>
+  <text x="135" y="55" text-anchor="middle" font-size="18" font-weight="bold">K</text>
+  <text x="135" y="80" text-anchor="middle" font-size="12">α · stiffness (+prox)</text>
+  <text x="135" y="98" text-anchor="middle" font-size="12">SPD, healthy, O(h⁻²) spectrum</text>
+  <text x="135" y="120" text-anchor="middle" font-size="12">solves: MUMPS LU / CG+GAMG</text>
+
+  <rect x="250" y="20" width="120" height="150" fill="#e8e0ee" stroke="#6a4a8c" stroke-width="2"/>
+  <text x="310" y="60" text-anchor="middle" font-size="18" font-weight="bold">B = M</text>
+  <text x="310" y="85" text-anchor="middle" font-size="12">mass coupling</text>
+  <text x="310" y="103" text-anchor="middle" font-size="12">O(h²) entries —</text>
+  <text x="310" y="121" text-anchor="middle" font-size="12">never fades with e^φ</text>
+
+  <rect x="370" y="20" width="120" height="150" fill="#e8e0ee" stroke="#6a4a8c" stroke-width="2"/>
+  <text x="430" y="60" text-anchor="middle" font-size="18" font-weight="bold">Bᵀ</text>
+
+  <rect x="370" y="20" width="0" height="0" fill="none"/>
+
+  <rect x="490" y="20" width="130" height="150" fill="#f6dcdc" stroke="#b03a2e" stroke-width="2"/>
+  <text x="555" y="55" text-anchor="middle" font-size="18" font-weight="bold">D</text>
+  <text x="555" y="80" text-anchor="middle" font-size="12">−M ⊙ e^φ</text>
+  <text x="555" y="100" text-anchor="middle" font-size="12">scaled mass; diagonal</text>
+  <text x="555" y="117" text-anchor="middle" font-size="12">tail 10⁻²⁸…10⁻⁸⁰</text>
+  <text x="555" y="140" text-anchor="middle" font-size="12" fill="#b03a2e">DEGENERATE BLOCK</text>
+  <text x="555" y="158" text-anchor="middle" font-size="12" fill="#b03a2e">37 / 177 / 765 / 12437 dead rows</text>
+</svg>
+<figcaption>Fig. 1 — The LVPP saddle block structure. Two healthy blocks (K, B) and one degenerate
+block (D) whose diagonal tail carries the entire pathology. Dead-row counts at L2/L3/L4/L5-uniform.</figcaption>
+</figure>
+
+<h2>2. The Schur complement is the load-bearing object</h2>
+<p>Eliminating the (healthy) primal block leaves the latent Schur complement</p>
+$$
+S \;=\; D - B^{\top} K^{-1} B .
+$$
+<p>The decisive measured fact of this project: <em>S never collapses</em>, even at full degeneracy.
+On the dead subspace \(D \to 0\), but the coupling term \(-B^{\top}K^{-1}B\) carries those rows
+exactly because \(B = M\) is a plain mass matrix — its entries do not scale with \(e^{\phi}\).
+Measured spectrum of \(S\): strictly negative definite, \(\lambda_{S,\min} \approx
+-5.6\cdot10^{-2} / -1.4\cdot10^{-2} / -3.5\cdot10^{-3}\) across levels — pure \(h^{2}\) scaling,
+α-independent, no near-null cluster at any depth.</p>
+
+<figure>
+<svg viewBox="0 0 640 300" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="280" height="180" fill="#dbe9d9" stroke="#3c7a3c" stroke-width="2"/>
+  <text x="160" y="45" text-anchor="middle" font-size="14" font-weight="bold">Spectrum of true S (measured)</text>
+  <line x1="40" y1="150" x2="280" y2="150" stroke="#333" stroke-width="1.5"/>
+  <circle cx="60" cy="150" r="5" fill="#3c7a3c"/>
+  <circle cx="90" cy="150" r="5" fill="#3c7a3c"/>
+  <circle cx="130" cy="149" r="5" fill="#3c7a3c"/>
+  <circle cx="180" cy="151" r="5" fill="#3c7a3c"/>
+  <circle cx="240" cy="150" r="5" fill="#3c7a3c"/>
+  <text x="160" y="175" text-anchor="middle" font-size="12">λ_S,min ≈ −h²·c (h²-scaled, α-independent)</text>
+  <text x="160" y="193" text-anchor="middle" font-size="12">no near-null cluster at ANY depth — 0/1/1 near-zero eigs</text>
+
+  <rect x="340" y="20" width="280" height="180" fill="#fbeeea" stroke="#b03a2e" stroke-width="2"/>
+  <text x="480" y="45" text-anchor="middle" font-size="16" font-weight="bold">Monolithic operator J (the trap)</text>
+  <text x="480" y="70" text-anchor="middle" font-size="12">latent rows where e^φ → 0 form a</text>
+  <text x="480" y="88" text-anchor="middle" font-size="12">near-null subspace of J itself:</text>
+  <text x="480" y="106" text-anchor="middle" font-size="12" fill="#b03a2e">‖·‖ down to 10⁻⁷⁰, growing with contact area</text>
+  <text x="480" y="124" text-anchor="middle" font-size="12">LU: slides along the flat manifold (fine)</text>
+  <text x="480" y="142" text-anchor="middle" font-size="12" fill="#b03a2e">unfloored PC: divides by machine-zero → fails</text>
+  <text x="480" y="160" text-anchor="middle" font-size="12">dim = dead-row count 37/177/749 (L0/L1/L2)</text>
+  <text x="480" y="160" text-anchor="middle" font-size="12"> </text>
+  <text x="480" y="186" text-anchor="middle" font-size="12"> </text>
+</svg>
+<figcaption>Fig. 2 — The dichotomy this project established: the Schur complement (left) is
+spectrally healthy at every depth; the degeneracy lives only in the monolithic operator's dead
+latent rows (right). Any PC that must <em>invert</em> D directly (Jacobi, diagonal-Schur) hits the
+right-hand rock; one that inverts S does not.</figcaption>
+</figure>
+
+<h2>3. Solver architecture evolution (all measured)</h2>
+
+<table>
+<tr><th>configuration</th><th>L0</th><th>L1</th><th>L2</th><th>L3</th><th>L4</th><th>outcome</th></tr>
+<tr><td>additive fieldsplit + floor (Finding 1)</td><td class="tag-ok">7/22</td><td class="tag-bad">✗</td><td class="tag-bad">✗</td><td colspan="2">—</td><td>floor necessary here</td></tr>
+<tr><td>Schur selfp, ψ_floor=1e-2 (Finding 6)</td><td>7/22</td><td>—</td><td>8/19</td><td colspan="2">—</td><td>converges LU-identically; outer its 45→926</td></tr>
+<tr><td>per-cell exact Schur (refuted)</td><td>8/21</td><td>—</td><td>8/19</td><td colspan="2">—</td><td>coupling subdominant — growth unchanged</td></tr>
+<tr><td><strong>Schur selfp, ψ_floor=0</strong></td><td class="tag-ok">14</td><td class="tag-ok">29</td><td class="tag-ok">48</td><td class="tag-ok">105</td><td class="tag-ok">329</td><td>LU-identical everywhere; N^0.8 growth</td></tr>
+</table>
+<p><span class="meta">Numbers in the last two rows are max outer-GMRES its per solve; solves are
+LU-identical in prox/Newton/error counts at every level where run.</span></p>
+
+<figure>
+<svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+  <rect x="15" y="15" width="630" height="300" fill="none" stroke="#333" stroke-width="1.5"/>
+  <text x="330" y="40" text-anchor="middle" font-size="16" font-weight="bold">One Newton step, floorless Schur configuration</text>
+
+  <rect x="30" y="70" width="130" height="60" fill="#dbe9d9" stroke="#3c7a3c" stroke-width="2"/>
+  <text x="95" y="95" text-anchor="middle" font-size="13" font-weight="bold">outer GMRES</text>
+  <text x="95" y="115" text-anchor="middle" font-size="11">on matfree J</text>
+
+  <rect x="220" y="55" width="200" height="90" fill="#fff7e6" stroke="#8b6e1e" stroke-width="2"/>
+  <text x="320" y="80" text-anchor="middle" font-size="13" font-weight="bold">PC = block-UL on Pmat</text>
+  <text x="320" y="100" text-anchor="middle" font-size="12">y₁ = K⁻¹ r₁   (MUMPS)</text>
+  <text x="320" y="120" text-anchor="middle" font-size="12">y₂ = Sₚ⁻¹ (r₂ − M y₁)</text>
+
+  <rect x="480" y="45" width="160" height="55" fill="#dbe9d9" stroke="#3c7a3c" stroke-width="2"/>
+  <text x="560" y="68" text-anchor="middle" font-size="12">Sₚ = D − M diag(K)⁻¹Mᵀ</text>
+  <text x="560" y="88" text-anchor="middle" font-size="11">selfp (diag approx)</text>
+
+  <rect x="480" y="115" width="160" height="55" fill="#dce7f5" stroke="#2e5e9e" stroke-width="2"/>
+  <text x="560" y="138" text-anchor="middle" font-size="12">or: matfree S action</text>
+  <text x="560" y="156" text-anchor="middle" font-size="11">+ inner CG on −S (rtol 1e-4, cap 40)</text>
+
+  <line x1="160" y1="100" x2="220" y2="100" stroke="#333" marker-end="url(#ar)"/>
+  <line x1="420" y1="90" x2="475" y2="75" stroke="#333" marker-end="url(#ar)"/>
+  <line x1="420" y1="125" x2="475" y2="140" stroke="#333" marker-end="url(#ar)" stroke-dasharray="5,3"/>
+  <text x="300" y="160" text-anchor="middle" font-size="11" fill="#888">psi_floor = 0 — the floor is deleted</text>
+
+  <rect x="30" y="180" width="610" height="120" fill="#f7f4ee" stroke="#999" stroke-width="1"/>
+  <text x="330" y="205" text-anchor="middle" font-size="13" font-weight="bold">What each refutation established</text>
+  <text x="330" y="228" text-anchor="middle" font-size="12">per-cell exact Schur coupling: subdominant, O(h⁴) vs O(h²) → no effect (bit-identical)</text>
+  <text x="330" y="248" text-anchor="middle" font-size="12">ψ_floor (any ε ≥ 1e-3): O(ε) PC–operator mismatch on the transition band → THE growth driver</text>
+  <text x="330" y="268" text-anchor="middle" font-size="12">rank-k dead-set correction: deficiency band rank ≥ 70/241/829 ≫ k → not low-rank-curable</text>
+  <text x="330" y="288" text-anchor="middle" font-size="12">graded-aware diag Sp: diag(K)⁻¹K κ only 3.3e3→8.9e3 → mismatch hypothesis refuted</text>
+  <text x="330" y="308" text-anchor="middle" font-size="12">inner CG on −S (rtol 1e-4, cap 40): 6/10/15 its on graded states — the fix that works</text>
+
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#333"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>Fig. 3 — Solve flow and the refutation ladder. Each dead end is a measured
+result, not a failed attempt; together they cornered the floor as the sole growth driver.</figcaption>
+</figure>
+
+<h2>3. The refutation ledger</h2>
+<div class="negative">
+<p><strong>Four hypotheses were tested and refuted by direct measurement</strong> (each with a
+bit-identical control proving the implementation was active):</p>
+<ol>
+<li><strong>Schur-approximation quality</strong> — exact per-cell broken-basis Sp changes nothing:
+coupling |C0| ~ 7.3×10⁻⁴ × |D_floor|; BᵀK̂⁻¹B is O(h⁴) vs D's O(h²), structurally subdominant
+(hierarchical-pG's recipe targets divergence-coupled systems where the scalings are equal).</li>
+<li><strong>Naive active-set rows</strong> — identity-patching dead rows destroys the Schur balance:
+825 its at L0, diverges at L2. Dead rows must be treated consistently with the coupling.</li>
+<li><strong>Rank-k dead-subspace correction</strong> — exact on span(V) to 10⁻¹⁷, yet fails at depth:
+the floored PC's deficiency E − I has slowly-decaying singular values; the band above σ = 0.1 has
+rank ≥ 70/241/829 ≫ dead count 45/177/765, σ_k still O(1). The floor damages a whole
+<em>transition band</em>, not just the dead rows — not low-rank-curable.</li>
+<li><strong>diag(K)⁻¹ grading mismatch</strong> — κ(diag(K)⁻¹K) grows only 3.3e3→8.9e3 across
+h-ratios 1×→45.6× (predicted ~2000×); ‖Sₚ−S‖ stays ~1.6e-3. Grading-aware diagonal variants are
+worse than baseline; per-cell coupling stays a negative on graded meshes too.</li>
+</ol>
+</div>
+
+<h2>4. The floor: necessary once, deleted twice</h2>
+<p>The ψ_floor (ε·mass on the latent block of Jp only) was introduced when the additive config's
+latent diagonal solve divided by machine-zero rows. It is <em>our</em> addition — the papers' only
+precedent is a J-level perturbation in the fracture example (ι = 10⁻³), on a non-potential problem.
+Its measured biography:</p>
+<ol>
+<li><strong>Load-bearing for the additive config</strong> — without it, PC setup divides by
+10⁻⁷⁰ → Inf/NaN → DIVERGED_PC_FAILED. Design rule established by measurement: Jp-only, never on J
+(operator floor fails at every level; the proximal iteration needs exact Newton steps).</li>
+<li><strong>Costly at depth on Schur</strong> — the exact-PC decomposition isolated it: unfloored
+exact-S PC gives outer its = 1 <em>flat at every depth</em>; the same PC with floored S reproduces
+the entire growth curve (145/895/1000-diverged).</li>
+<li><strong>Deleted on the Schur path</strong> — Sp = D − M diag(K)⁻¹Mᵀ is nonsingular without any
+floor (dead rows carried by the coupling); ψ_floor = 0 end-to-end is LU-identical with max its
+14/29/48 (was 45/130–560/400–926). The ε-ladder maps the safety band: ε ≤ 1e-5 safe everywhere,
+1e-4 the knife edge (non-monotone resonance), ≥ 1e-3 kills L2 cold solves. Drift-concentrated
+floors land in the bad band and are rejected.</li>
+</ol>
+
+<h2>5. Scaling (serial, single box) and parallel correctness</h2>
+<table>
+<tr><th>level</th><th>dofs/field</th><th>prox</th><th>newton</th><th>err(u_h)</th><th>max its</th><th>wall</th></tr>
+<tr><td>L2</td><td>8,321</td><td>8</td><td>19</td><td>8.375e-04</td><td>48</td><td>6.5 s</td></tr>
+<tr><td>L3</td><td>33,025</td><td>8</td><td>20</td><td>1.905e-04</td><td>105</td><td>~42–55 s</td></tr>
+<tr><td>L4</td><td>131,585</td><td>8</td><td>21</td><td>5.006e-05</td><td>329</td><td>532 s</td></tr>
+</table>
+<p>Errors clean \(O(h^{2})\) through L4; ψ depth stable (−318…−372); dead rows follow the
+perimeter law ~4×/level (749 → 3,073 → 12,437); peak RSS 1.7 GB at L4. Outer its grow ≈ \(N^{0.8}\)
+— honest polynomial, not flat. 2-rank MPI: correctness PASS (LU-identical L0/L1, feasible, both
+<code>use_amat</code> settings safe); wall-neutral at small sizes, as expected.</p>
+
+<h2>6. Graded meshes: the fix</h2>
+<p>Free-boundary-refined (band) meshes are <em>dead-row factories</em> — sharpening the boundary
+converts smeared compromise nodes into cleanly-pinned contact nodes; the dead fraction of latent
+dofs explodes 7% → 50% (uniform holds ~9%), and outer-GMRES blowup tracks grading strength
+(h_max/h_min)². Three candidate fixes tested on identical extracted graded states:</p>
+
+<table>
+<tr><th>variant</th><th>uni_l2</th><th>band_l4 (22.8×)</th><th>band_l5 (45.6×)</th></tr>
+<tr><td>selfp baseline (cold)</td><td>22</td><td>39</td><td>51</td></tr>
+<tr><td>exact unfloored S (gold)</td><td>1</td><td>1</td><td>1</td></tr>
+<tr><td>A: graded-aware diag Sp</td><td>89 / 92</td><td>85 / 85</td><td>90 / 90</td></tr>
+<tr><td class="tag-ok"><strong>B: matfree S + inner CG (rtol 1e-4, cap 40)</strong></td><td class="tag-ok">6</td><td class="tag-ok">10</td><td class="tag-ok">15</td></tr>
+<tr><td>B rtol 1e-3 / 1e-2</td><td>5 / 8</td><td>12 / breakdown</td><td>21 / breakdown</td></tr>
+<tr><td>C: per-cell exact coupling</td><td>29</td><td>53</td><td>83</td></tr>
+</table>
+<p>Variant B — Schur block action via the triple product \(S v = Dv - B^{\top}(K^{-1}(Bv))\) with
+capped inner CG on \(-S\) — beats selfp on every mesh and is nearly flat under 45.6× grading.
+The refuted diag(K)⁻¹ mismatch hypothesis (κ grows only 3.3e3→8.9e3 across 1×→45.6×) is recorded
+alongside. <em>Generality note:</em> CG is valid here because −S is SPD in the symmetric/energy
+case; for non-potential LVPP systems (convection, q-Laplacian) S becomes nonsymmetric/indefinite
+and the inner solver must become GMRES/MINRES — the triple-product matvec itself assumes no
+symmetry, so the architecture transfers with the inner method's name changed.</p>
+
+<h2>7. What LVPP promised vs. what it costs</h2>
+<p>The papers' promises are all <span class="tag-ok">delivered</span> in our measurements: no
+operator mutation ever (bit-exact matfree action through the full proximal loop), smooth
+well-posed subproblems (prox 8/11/8, Newton 21/23/19 — mesh-independent, LU-identical), feasibility
+by construction. What was never promised — and is nowhere analyzed in [LVPP] or the pG paper — is
+a uniformly conditioned <em>linear</em> system: the same smooth change of variables that buys
+constraint satisfaction makes the latent variable unidentifiable on the contact set, and the
+spectrum pays. That bill was never itemized before the spectral anatomy; itemizing it is this
+project's contribution.</p>
+
+<h2>8. The final recipe</h2>
+<pre>
+Production (symmetric/energy case):
+  matfree Amat  +  assembled unfloored Pmat (psi_floor = 0)
+  +  PCFieldSplit(schur, upper, use_amat=False, selfp)
+  +  fieldsplit_0: preonly + MUMPS-LU        (exact K; GAMG is a measured wall-loser)
+  +  fieldsplit_1: preonly + MUMPS-LU        (LU of selfp Sp)
+  +  outer GMRES rtol 1e-6, restart 250
+
+Graded meshes (h_max/h_min > ~5): replace the Schur block solve with
+  matfree S action (triple product) + capped inner CG on −S (rtol 1e-4, cap 40);
+  for non-potential families: inner GMRES on S, same discipline.
+
+On adaptive (band) meshes: expect dead-row factories at the refined
+boundary ring; uniform meshes minimize solver cost at matched dofs.
+</pre>
+
+<h2>10. End-to-end promotion of variant B (final experiment)</h2>
+<p>The winning Schur treatment was attached to the production solver via a monolithic PYTHON PC
+(petsc4py instantiates <code>pc_python_type</code> contexts with no constructor args, so sub-PC
+attachment cannot receive the lvpp handle; the monolithic PC replicates the upper-factorization
+semantics exactly, outer FGMRES):</p>
+<table>
+<tr><th>mesh</th><th>dofs/field</th><th>grading</th><th>prox/newton</th><th>err(u_h)</th><th>max its (selfp)</th><th>wall</th></tr>
+<tr><td>uni_l0</td><td>545</td><td>1×</td><td>8/21</td><td>1.553e-02</td><td>62 (14)</td><td>3.0 s</td></tr>
+<tr><td>uni_l1</td><td>2113</td><td>1×</td><td>11/23</td><td>3.599e-03</td><td>65 (29)</td><td>8.7 s</td></tr>
+<tr><td>uni_l2</td><td>8321</td><td>1×</td><td>8/19</td><td>8.365e-04 (LU 8.375e-04)</td><td>70 (48)</td><td>28.9 s</td></tr>
+<tr><td>band_l4</td><td>3613</td><td>22.8×</td><td>39/49</td><td>5.020e-03</td><td><strong>161</strong> (297)</td><td>36.6 s</td></tr>
+<tr><td>band_l5 (gmres inner)</td><td>6661</td><td>45.6×</td><td>8/17</td><td>4.995e-03</td><td><strong>188</strong> (323)</td><td>116.6 s</td></tr>
+<tr><td>band_l6 (gmres inner)</td><td>14245</td><td>—</td><td colspan="4">every linear solve CONVERGED_RTOL (2–192 its) where selfp production DIVERGED (ksp=−5); proximal completion cut by wall budget</td></tr>
+</table>
+<p><strong>Solver-correctness verdict: PASS</strong> — LU-identical prox/Newton/err on every uniform
+level, and the graded blowup (297/323) collapses (161/188), with the band_l6 divergence <em>eliminated</em>.
+<strong>Two measured costs:</strong> (1) end-to-end, variant B is <em>slower than selfp on uniform
+meshes</em> (~4.5× wall; the first, coldest Newton solve pays 62–70 its everywhere) — its value is
+grading-robustness, not uniform-mesh speed; (2) with inner CG capped at 40, the band_l5 proximal
+iteration <em>stalled</em> (increment plateaus at 4.24e-4 with all linear solves at 4–5 its) — the
+inexact Schur action perturbs the Newton matrix and the proximal map drifts within tolerance; the
+same chain with inner GMRES (looser effective cap) solves band_l5 cleanly in 8 prox. Evidence is
+CG-specific, not mesh- or implementation-driven. <strong>Production recommendation:</strong> inner
+GMRES on S (rtol 1e-4, restart ~40) — safe on graded meshes, kills the l6 divergence, valid for
+non-potential families; accept the wall premium or use it only when selfp stalls.</p>
+<h2>10b. True-matfree hpG (final experiment)</h2>
+<p>The last global factorization (cached Cholesky of A) has been removed from the solve path:
+K⁻¹ is now a capped CG solve with an AMG hierarchy built once per mesh (preconditioner-only),
+the Schur block is the matfree triple product, Ŝ stays batched cellwise Cholesky, E_β = 0 in the
+operator (the §4 decoupling, now measured), capped inner GMRES, outer FGMRES.</p>
+<p><strong>Correctness:</strong> bit-consistent with serial-direct at p=2 (8/22, err identical).
+<strong>The fair high-order comparison (L0, p=4, both arms, same capped config):</strong> iteration
+counts are <em>identical</em> (8/30, err 9.542e-5, outer 27, inner 39.4/apply) — making A matfree
+costs a per-apply A-solve premium (3.5× wall at p=4, 1.3× at p=2) that grows with κ(A).</p>
+<p><strong>Graded 51.4× p=4 (37k+20k dofs):</strong> the assembled arm HOLDS (8/22, err 1.568e-5,
+535 s) — the E_β-decoupled + capped-GMRES config stands at high p + strong grading. The matfree
+arm recorded two honest negatives: GAMG stalls on graded K₀ (1994/1994 non-converged A-CG solves);
+hypre BoomerAMG is healthy per-iteration (28.7 its avg, zero nonconv) but projected past the
+session budget. <strong>The open preconditioner question is an AMG for graded high-order K;
+everything else in the upgrade blueprint is now measured.</strong></p>
+<p><strong>Remaining open items:</strong> an AMG for graded high-order K (GAMG fails, BoomerAMG
+expensive), native-PETSc reimplementation of the variant-B PC, and the N^0.8 uniform-mesh growth
+under variant B.</p>
+
+<h2>9. Provenance</h2>
+<p>Scripts: <code>experiments/{matfree_fieldsplit, schur_probe, schur_sp_upgrade, schur_percell,
+spectrum_anatomy, spectrum_results, growth_driver, rankk_correction, eps_schedule, scale_up,
+amr_health, par_smoke, grade_pc, promob}</code>. Every refutation includes its control
+(bit-identical curve / corrected rel-resid) proving the mechanism was actually exercised. Where a
+harness had a bug (petsc4py context-manager <code>getArray</code> → PETSc error 101; mis-scaled
+rel-resid column), the fix is recorded in RESEARCH.md so the numbers are reproducible.</p>
+
+</body>
+</html>

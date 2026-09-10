@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.history/
+*.pvd
+*.vtu
+*.pvtu
+*.bp/
