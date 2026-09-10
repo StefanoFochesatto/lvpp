@@ -177,7 +177,7 @@ energy = 0.5 * inner(sigma(u, mu, lmbda), epsilon(u)) * dx
 constraint = SignoriniContact(n_g=n_g, gap=gap, contact_id=CONTACT_ID)
 
 lvpp = LVPP(energy=energy, u=u, bounds=constraint, bcs=bc,
-            alpha_rule="linear",
+            alpha_schedule="linear",
             alpha_parameters={"alpha0": 0.005, "c": 2.0, "C_max": 1e3},
             on_newton_failure="reduce_alpha",
             form_compiler_parameters={"quadrature_degree": 6},

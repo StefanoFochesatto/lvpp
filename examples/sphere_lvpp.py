@@ -64,7 +64,8 @@ for level, mesh in enumerate(hierarchy):
     # snes_rtol (avoid over-solving into the psi -> -inf saturation), exit on
     # the H1 primal increment, alpha_max = 1e2
     lvpp = LVPP(energy=energy, u=u, bounds=(psi, None), bcs=bc,
-                alpha_rule="double_exponential", alpha_parameters={"alpha_max": 10.0},
+                alpha_schedule="double_exponential",
+                alpha_parameters={"alpha_max": 10.0},
                 increment_norm="H1", verbose=False,
                 form_compiler_parameters={"quadrature_degree": 6},
                 solver_parameters={"snes_linesearch_type": "l2",
@@ -80,7 +81,7 @@ for level, mesh in enumerate(hierarchy):
     err_h = errornorm(uexact, u_h)
     err_t = errornorm(uexact, u_tilde)
     feas_ut = sum(assemble(f) for f in
-                  lvpp._raw_constraints[0].feasibility_forms(V, u_tilde))
+                  lvpp.constraints[0].feasibility_forms(V, u_tilde))
     total_newton = sum(lvpp.newton_iterations)
     print(f"{level:>5} {V.dim():>8} {lvpp.proximal_iterations:>5} "
           f"{total_newton:>7} {err_h:>10.3e} {err_t:>12.3e} {feas_ut:>14.3e}")

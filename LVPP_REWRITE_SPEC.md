@@ -1,6 +1,7 @@
 # SPEC: readable rewrite of the `lvpp` library
 
-**Status:** proposal for review.
+**Status:** implemented on branch `rewrite/human-readable` (phases 1–3 of §8);
+design record, with the gate results in §14.
 **Date:** 2026-09-10.
 **Inputs:** `lvpp/lvpp/**` (the library), `lvpp/experiments/archive_2026-09/**`
 (the frozen evidence chain), `lvpp/experiments/hpg/**` (the hpG port, gates 0–1
@@ -885,3 +886,65 @@ Both are consistent with the paper; neither is a "beat". The rewrite's Phase-3
 gate and any write-up should state the outer/inner pairing explicitly, and the
 correction should be carried back into the port docs when they are next
 touched. This is an interpretation fix only — no measured number changes.
+
+---
+
+## 14. Implementation status (branch `rewrite/human-readable`)
+
+Phases 1–3 of §8 are implemented. New package layout:
+
+```
+lvpp/lvpp/
+  schedules.py  assembly.py  solver.py  benchmarks.py
+  preconditioners/{__init__,base,direct,floor,schur}.py
+  hpg/{__init__,spaces,spectral,twostage,solver}.py
+```
+
+`lvpp/lvpp/lvpp.py` was deleted (content redistributed; it remains at
+`git show main:lvpp/lvpp.py`, and every deprecated kwarg/attribute still works
+as an alias, per §7.2).
+
+### 14.1 Gates (all run on the branch)
+
+| gate | script | result |
+|---|---|---|
+| unit suite | `pytest tests/` | 8 passed (baseline: 8 passed) |
+| P1 sphere oracle | `examples/sphere_lvpp.py` | prox `[8,11,8,8]`; err `1.553e-2 / 3.599e-3 / 8.375e-4` — identical |
+| P1 Signorini | `examples/signorini_lvpp.py` | `SIGNORINI EXAMPLE OK` |
+| alpha schedules | `experiments/rewrite_checks/check_schedules.py` | max diff `0.0` over 7200 grid points |
+| preconditioner seam | `check_preconditioners.py` | 20/20 |
+| floorless Schur PC | `check_schur_pc.py` | prox/newton/err/dofs and max outer its `14/29/48` reproduce |
+| deprecated floor paths | `check_deprecated_paths.py` | floored Schur converges (prox 8); operator floor still fails (negative control for `operator_correction`) |
+| hpG L0 p=2 uniform | `check_hpg.py` | paper-literal arm `8 / 23 / 1.1927e-3 / outer 2 / inner 12.75` vs recorded `8/23/1.193e-3/2/12.8` |
+| hpG graded chain | `check_hpg_graded.py` | g4–g7 (26.4x→226.1x, to 12.5k cells): no divergence, outer flat at 2, inner 12–14/apply |
+| hpG spectral structure | `check_spectral.py` | 2D stage-0 numbers reproduced to the digit; `d=1` Ahat diagonal; `d=3` → 8 parity classes (the §6 inference, now measured) |
+| hpG discretization | `check_hpg_spaces.py` | dims, ratio calibration, `dim ∈ {1,2,3}`, rejections all pass |
+
+### 14.2 Deviations from this spec (recorded)
+
+1. **`graded` calibrates the grading.** The archive's `graded_quad(n, ratio)`
+   measured ~1.21x its request (26.414x for a requested 21.8). The rewritten
+   `HPGDiscretization.graded` calibrates the chain growth so
+   `grading_ratio() == ratio`. The graded gate therefore passes the archive's
+   *measured* ratios (26.4/55.3/114.8/226.1) and asserts *no divergence with
+   bounded iterations*, not digit-identical counts (the meshes differ slightly:
+   same band, ~10% weaker chains). Recorded vs observed on the chain:
+   `6/20, 7/19, 7/20, 8/20` prox/newton vs `8/20, 7/19, 7/20, 8/20`.
+2. **`HPG(discretization, u, bounds, ...)`** takes an `HPGDiscretization` (or a
+   `(mesh, p)` tuple) rather than `HPG(mesh, p, ...)` (§5.4 sketch): a bare
+   mesh and degree cannot say whether the mesh is uniform or graded.
+3. **`benchmarks.py` is a module inside the package** (`lvpp.benchmarks`)
+   rather than `lvpp/benchmarks/`, so it is importable from the checks and
+   experiments, which live outside the package root.
+4. **`experiments/hpg/` is retained** as the port's evidence of record
+   (`RESULTS.md` names its files); `lvpp/hpg/` supersedes it as the supported
+   implementation. Deleting the duplicated port machinery is the open Phase-4
+   decision.
+5. **The stopping-rule default is still `PrimalIncrement`.** The paper-faithful
+   `Linear` schedule + `AlphaPlateau` stopping (§4.1, §13.3) is implemented and
+   documented but not yet exercised as a gate: every recorded number uses the
+   LVPP `double_exponential` scheme, and §13.3 item 1 notes the paper's own
+   criterion needs reconciling with its reported step counts before it can be
+   asserted.
+6. **`P_D` / `P_L P_D` remain unimplemented** (§5.3, §13.3 item 4). `P_F` is
+   what the 2D benchmarks use; the 3D comparison is untouched.

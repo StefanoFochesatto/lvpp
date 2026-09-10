@@ -8,10 +8,21 @@ Firedrake, using the latent variable proximal point (LVPP) algorithm of
     T. M. Surowiec, "The latent variable proximal point algorithm for
     variational problems with inequality constraints", arXiv:2503.05672 (2025).
 
-Each constrained unknown gets a latent variable psi; a mixed Newton system is
+Each constrained unknown gets a latent variable `psi`; a mixed Newton system is
 solved at each outer (proximal) iteration, and the bound-preserving output
 `u_tilde = grad R*(psi)` is feasible pointwise by construction for any alpha.
 The number of proximal iterations is mesh-independent.
+
+`lvpp.hpg` additionally implements the hierarchical proximal Galerkin (hpG)
+solver of
+
+    I. P. A. Papadopoulos, "Hierarchical proximal Galerkin: a fast hp-FEM
+    solver for variational problems with pointwise inequality constraints",
+    arXiv:2412.13733 (2026)
+
+as a preset: the same proximal loop and saddle system, discretized with
+`CG_p x DQ_{p-2}` spectral hierarchical elements and factored with the paper's
+two-stage `P_F` preconditioner.
 
 ## Install
 
@@ -36,9 +47,68 @@ Inside a Firedrake venv:
     print("feasible output min:", lvpp.u_tilde[0].dat.data_ro.min(),
           ">= obstacle min:", psi.dat.data_ro.min())
 
-Constraints are given per unknown as `(lower, upper)` pairs (either side may
-be `None`), or as any `Constraint` instance; multiple unknowns are supported
-and only constrained ones carry latent blocks.  Pass `energy=` (a UFL 0-form)
-or `residual=` (weak 1-form(s)); see the `LVPP` docstring and
+Constraints are given per unknown as `(lower, upper)` pairs (either side may be
+`None`), or as any `Constraint` instance; multiple unknowns are supported and
+only constrained ones carry latent blocks.  Pass `energy=` (a UFL 0-form) or
+`residual=` (weak 1-form(s)); see the `LVPP` docstring and
 `examples/sphere_lvpp.py` for the full interface, alpha schedules, and
 diagnostics (`feasibility()`, `complementarity()`, `dual_feasibility()`).
+
+## hpG quickstart (high-order, tensor-product cells)
+
+    from lvpp.hpg import HPG, HPGDiscretization
+
+    disc = HPGDiscretization.uniform(16, p=2)     # 16x16 quads, CG2 x DQ0
+    u = Function(disc.primal)
+    hp = HPG(disc, u, bounds=(psi, None), bcs=bc,
+             alpha_parameters={"alpha_max": 10.0}, increment_norm="H1")
+    hp.solve(tol=1e-4)
+
+`HPGDiscretization` also builds geometrically graded meshes
+(`HPGDiscretization.graded(n, p, ratio)`) and 1D/3D (`dim=1, 3`); hpG requires
+tensor-product cells (interval, quadrilateral, hexahedron).
+
+## Layout
+
+| module | contents |
+|---|---|
+| `lvpp/solver.py` | `LVPP`, the proximal loop (schedule, stopping, SNES, diagnostics) |
+| `lvpp/assembly.py` | `ProblemSpec` + `MixedSystem`: spaces, residual, Jacobians, diagnostic forms |
+| `lvpp/schedules.py` | alpha schedules and stopping rules (`PrimalIncrement`, `AlphaPlateau`) |
+| `lvpp/constraints.py` | `Constraint` interface and `BoxConstraint` |
+| `lvpp/legendre.py` | Legendre functions (Shannon, Fermi-Dirac, Hellinger, Gibbs simplex) |
+| `lvpp/preconditioners/` | the saddle-point preconditioner seam: `DirectFactorization`, `DegeneracyFloor`, `SchurFieldsplit`, `RawOptions` |
+| `lvpp/hpg/` | the hpG preset: spaces, per-cell spectral-Galerkin algebra, two-stage preconditioner |
+| `lvpp/benchmarks.py` | shared analytic sphere-obstacle data |
+
+## Preconditioners
+
+The mixed Newton system is factored through a small strategy interface
+(`lvpp.preconditioners.SaddlePreconditioner`), so the algorithm in
+`LVPP.solve` never knows how the linear algebra is done:
+
+    LVPP(..., preconditioner=None)          # direct LU/MUMPS (default)
+    LVPP(..., preconditioner="schur")       # floorless Schur fieldsplit
+    LVPP(..., preconditioner=HPGTwoStage()) # the hpG two-stage P_F
+    LVPP(..., preconditioner={"ksp_type": ...})   # raw PETSc options
+
+Floors and other regularizations live on the preconditioner Jacobian `Jp`
+only, never on the operator `J`: the outer proximal point iteration needs
+exact Newton directions (`DegeneracyFloor(on_operator=True)` is kept as a
+documented diagnostic and is measured to fail).
+
+## Compatibility
+
+`lvpp` models one problem class in one class, but the recorded research in
+`experiments/` and `RESEARCH.md` was written against an earlier, monolithic
+`lvpp/lvpp.py`.  The deprecated keyword arguments `psi_spaces=`, `alpha_rule=`,
+`psi_floor=`, `psi_floor_drift=`, `psi_floor_operator=` and
+`jacobian_regularization=` still work (with a `DeprecationWarning`) so those
+scripts remain executable; the private attributes they read (`lvpp._z`,
+`lvpp._alpha`, `lvpp._solver`, ...) are kept as aliases for the same reason.
+New code should use `latent_spaces=`, `alpha_schedule=`, a preconditioner, and
+the public handles (`snes`, `ksp`, `pc`, `matrix()`, `constraints`,
+`primal_spaces`, `bcs`, `alpha_constant`, `install_monitor`).
+
+See `LVPP_REWRITE_SPEC.md` for the design and `experiments/rewrite_checks/` for
+the gates that pin this rewrite to the recorded numbers.
