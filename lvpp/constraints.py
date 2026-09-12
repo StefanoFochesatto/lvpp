@@ -234,7 +234,7 @@ class BoxConstraint(Constraint):
     # Rewriting user data ----------------------------------------------------
 
     def remap(self, mapping):
-        """Rewrite bounds through ``mapping`` (binds user unknowns into the
+        """Replace bounds through ``mapping`` (binds user unknowns into the
         mixed system; required for QVI-type bounds)."""
         return BoxConstraint(
             lower=self._remap_expr(self.lower, mapping),

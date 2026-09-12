@@ -1,14 +1,29 @@
-"""Focused self-check for lvpp.hpg.spectral (reproduce RESULTS.md stage 0).
+"""Focused self-check for :mod:`lvpp.hpg.spectral`, stage 0 of RESULTS.md.
+
+Builds a :class:`SpectralGalerkin` operator on 16x16 uniform quadrilaterals for
+p = 2, 3, 4 and verifies it against the same forms assembled by Firedrake: the
+modal psi-mass off-diagonal (<= 1e-17), the on-cell operators against their
+closed forms (<= 1e-13) and the parity off-block entries (<= 1e-13), the
+thresholds recorded for stage 0 in ``experiments/hpg/RESULTS.md``.  The
+coupling of D_psi between different cells (its off-cell blocks) is measured
+separately and must vanish exactly.  The same comparison is repeated on an
+anisotropic 4x8 mesh (hx != hy, so the per-axis weights matter), on an interval
+(d = 1: Ahat must come out diagonal) and on hexahedral meshes in 3D (d = 3,
+isotropic and anisotropic).
+
+The Shat algebra is checked by inverting ``Shat = Vinv^T (L L^T) Vinv`` with
+``build_shat``: ``shat_apply`` must solve ``Shat_nodal y = x`` to 1e-10
+relative, and ``min_eig_negS`` must be positive (``-Shat`` SPD, since
+D_jac = -D_psi).
+
+Prints SPECTRAL OK only if the 2D, Shat and d = 1 checks pass; the d = 3 block
+prints its exception instead of raising.
 
 Env guard REQUIRED:
-PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
-OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
-  lvpp/experiments/rewrite_checks/check_spectral.py
 
-Prints verify_vs_firedrake() for d=2 x p=2,3,4 on 16x16 uniform quads, the
-D_psi off-cell-block measurement, the d=1 result (Ahat must be diagonal) and
-the d=3 result (hex mesh, if the install supports it).  Prints SPECTRAL OK
-only if every 2D assertion passes.
+  PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
+  OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
+  experiments/checks/check_spectral.py
 """
 import sys
 

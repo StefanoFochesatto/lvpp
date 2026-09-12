@@ -1,89 +1,91 @@
-"""The hpG two-stage preconditioner: the paper's sequential ``P_F``.
+"""The hpG two-stage preconditioner: the sequential ``P_F`` of section 4.4.
 
-``HPGTwoStage`` is the Python ``PC`` attached to the outer FGMRES in the
-hpG preset (:class:`lvpp.hpg.solver.HPG`).  It applies Papadopoulos,
-arXiv:2412.13733v4, eq. 4.5 to the mixed Newton matrix
+``HPGTwoStage`` is the Python ``PC`` attached to the outer FGMRES of the hpG
+preset (:class:`lvpp.hpg.solver.HPG`).  It applies eq. (4.5) of Papadopoulos
+(arXiv:2412.13733) to the mixed Newton matrix
 
     G = [[A_alpha, B], [B^T, J_psi_psi]]
 
 one outer Krylov iteration at a time.  The three steps are sequential --
-``S^-1`` depends on the two ``A_alpha^-1`` solves -- which is why this is a
-*preconditioner apply* and not a factorization:
+``S^-1`` is applied to the outcome of the first ``A_alpha^-1`` solve, and the
+second one consumes ``dpsi`` -- so the object is a *preconditioner apply*
+rather than a factorization:
 
     y    = b_psi - B^T A_alpha^-1 b_u
-    dpsi = S^-1 y          # inner GMRES on the true Schur, PC = cellwise Shat
+    dpsi = S^-1 y         # inner GMRES on the true Schur, PC = cellwise Shat
     du   = A_alpha^-1 (b_u - B dpsi)
 
-Sign conventions (one table, quoted from ``RESULTS.md`` stage 1)
----------------------------------------------------------------
-lvpp's lower-bound latent block is ``J_psi_psi = -D_psi``, so
+The outer solver is FGMRES because the preconditioner is variable: ``S^-1`` is
+itself an inner Krylov solve, so the outer iteration has to keep the vectors
+the preconditioner applied.
 
-===============  ===================================  ====================
-block            value                                sign
-===============  ===================================  ====================
-``A_alpha``      ``alpha * K + E``                    SPD primal block
-``B``            coupling ``(psi, B v)``              n0 x n1
-``J_psi_psi``    ``-D_psi``                           negative definite
-``S``            ``J_psi_psi - B^T A_alpha^-1 B``     negative definite
-``-Shat_c``      ``-D_jac + coupling + beta * M_c``   SPD (cellwise)
-===============  ===================================  ====================
+Sign conventions
+----------------
+lvpp's lower-bound constraint block is ``J_psi_psi = -D_psi``, so
+
+    A_alpha     alpha * K + E                     SPD primal block
+    B           coupling ``(psi, B v)``           n0 x n1
+    J_psi_psi   -D_psi                            negative definite
+    S           J_psi_psi - B^T A_alpha^-1 B      negative definite
+    -Shat_c     -D_jac + coupling + beta * M_c    SPD (cellwise)
 
 ``D_jac`` is the latent block *of the Jacobian* (``= -D_psi``), which is what
-:meth:`~lvpp.hpg.spectral.SpectralGalerkin.build_shat` expects; ``-Shat_c``
-is SPD for ``D_psi`` PSD and is Cholesky-factorized cellwise.  The inner
+:meth:`~lvpp.hpg.spectral.SpectralGalerkin.build_shat` expects.  The true
+Schur complement is ``S = -(D_psi + E_beta + B^T A_alpha^-1 B)``, so ``S`` is
+negative definite and ``-Shat_c`` is SPD for ``D_psi`` positive semidefinite;
+``-Shat_c`` is Cholesky-factorized cellwise (eq. 4.6).  The inner
 preconditioner therefore applies ``-(Shat_c)^-1``, the inverse of ``S`` up to
 the hpG cellwise approximation of ``B^T A_alpha^-1 B``.
 
 ``E_beta`` is always ``0`` in the operator
 ------------------------------------------
-The paper puts ``E_beta`` in the operator; we do not.  ``E_beta != 0`` is a
-regularization and regularizations belong on ``Jp`` only (the Jp-only rule,
-``RESEARCH.md`` Finding 1: an operator-level floor fails at every mesh
-level).  This is the obstacle problem, where the paper also runs ``beta = 0``
-in its refinement study, and our sweep ``{0, 1e-5, 1e-4, 1e-3}`` is
-iteration-identical -- ``beta`` enters *only* ``Shat``.  ``HPGTwoStage`` adds
-no ``jacobian_correction``.
+The paper puts ``E_beta`` in the operator; this implementation does not.
+``E_beta != 0`` is a regularization, and regularizations belong on ``Jp`` only
+(the Jp-only rule, ``RESEARCH.md`` Finding 1: an operator-level floor fails at
+every mesh level).  This is the obstacle problem, where the paper also runs
+``beta = 0`` in its refinement study, and the sweep ``{0, 1e-5, 1e-4, 1e-3}``
+is iteration-identical -- ``beta`` enters *only* ``Shat``.  ``HPGTwoStage``
+adds no ``jacobian_correction``.
 
 The cached alpha-independent primal factorization
 -------------------------------------------------
 With Dirichlet rows replaced by identity rows ``E``, the assembled primal
 block is ``A(alpha) = alpha * K0 + (1 - alpha) * E`` with ``K0 = stiffness +
-E`` (alpha-free; verified at machine precision, 3.6e-15), so
+E``, which is alpha-free (verified at machine precision, 3.6e-15), so
 
     A(alpha)^-1 b = K0^-1 (D_alpha b),   D_alpha = diag(1/alpha interior, 1 bc)
 
-``K0`` is factored once per mesh (MUMPS-LU by default) and reused across
-every proximal iteration and every alpha -- the paper's sec-4.4 cache trick.
-The alpha-dependent part is the cheap vector scaling ``D_alpha``, refreshed
-from the live :class:`~lvpp.preconditioners.base.SaddleView` constant in
-:meth:`HPGTwoStage.setUp`.
+``K0`` is factored once at the start of the nonlinear solve (the cache of the
+paper's section 4.4) and reused across every proximal iteration and every
+alpha.  All that is alpha-dependent is the cheap vector scaling ``D_alpha``,
+which :meth:`HPGTwoStage.setUp` rebuilds from the live ``alpha`` of the saddle
+view it was installed with
+(:class:`~lvpp.preconditioners.base.SaddleView`).
 
-``a_action="gamg"`` is the matfree arm: the same alpha-free ``K0`` with a
-*capped* CG + AMG solve instead of the cached factorization (the
-``matfree_hpG.py`` arm, measured bit-consistent in iteration counts with the
-LU arm at p=2/p=4 uniform).  Tune it with ``a_rtol``/``a_maxit``/``a_pc``.
+The matrix-free option is ``a_action="gamg"``: CG with AMG on the same
+alpha-free ``K0`` in place of the cached factorization, so that no global
+factorization appears in the apply path.  It is tuned with ``a_rtol`` /
+``a_maxit`` / ``a_pc``, and measured bit-consistent in iteration counts with
+the LU factorization at p=2/p=4 uniform.
 
-Inner solver and the two recorded arms
---------------------------------------
-GMRES (not CG -- the archived ``promob.py`` proximal stall) on the true
-Schur, preconditioned by the batched cellwise Cholesky of ``-Shat_c``.  The
-default ``inner_rtol=1e-4`` / ``inner_maxit=40`` is the *rewritten* default:
-the capped-inexact discipline that rescued the ``p=4`` wedge in
-``RESULTS.md`` (the published arm hit the 500-iteration cap on nearly every
-apply once alpha deepened and never finished).  The recorded uniform L0-L2
-``p=2`` table used the paper-literal arm ``inner_rtol=1e-6,
-inner_maxit=500`` -- a harness setting, not a paper one, and it remains
+Inner solver
+------------
+GMRES (not CG -- the older ``promob.py`` proximal stall) on the true Schur,
+preconditioned by the batched cellwise Cholesky of ``-Shat_c``.  The default
+``inner_rtol=1e-4`` / ``inner_maxit=40`` is the capped-inexact discipline that
+keeps the ``p=4`` case from wedging: with the loosest published settings the
+inner solver hit the 500-iteration cap on nearly every apply once alpha
+deepened, and never finished.  The recorded uniform L0-L2 ``p=2`` table used
+the paper-literal settings ``inner_rtol=1e-6, inner_maxit=500``, which remain
 selectable: ``HPGTwoStage(inner_rtol=1e-6, inner_maxit=500)``.
 
 The ``cell_blocks`` type contract
 ---------------------------------
 :meth:`SpectralGalerkin.cell_blocks` takes a PETSc ``Mat`` (it reads
-``getValuesCSR``).  The archived PC converted the latent block to a scipy
-``csr_matrix`` for its matvecs and then passed *that* to ``cell_blocks``,
-which forced a driver-side subclass (``promote_hpg.SGDriver``) to dispatch on
-the input type.  Here the latent block is kept as a PETSc ``Mat`` for
-``cell_blocks`` and a separate scipy ``csr_matrix`` view is held for the
-matvecs; no dispatch, one documented type at the seam.
+``getValuesCSR``), so the latent block is kept as a PETSc ``Mat`` for that
+call and a separate scipy ``csr_matrix`` view of the same values is held for
+the matvecs.  One documented type per purpose, and no dispatch on the input
+type.
 """
 
 import numpy as np
@@ -96,9 +98,9 @@ from lvpp.preconditioners.base import PreconditionerBase
 __all__ = ["HPGTwoStage", "SP_TWOSTAGE"]
 
 
-# promote_hpg.py SP_TWOSTAGE, verbatim: the outer solver of the two-stage
-# configuration (matfree action, assembled preconditioner matrix, FGMRES
-# restart 250, Python PC).
+# outer solver of the two-stage configuration: matrix-free action, assembled
+# preconditioner matrix, FGMRES restart 250, Python PC.  The same settings as
+# SP_TWOSTAGE in the hpG experiment scripts.
 SP_TWOSTAGE = {
     "mat_type": "matfree",
     "pmat_type": "aij",
@@ -115,16 +117,18 @@ SP_TWOSTAGE = {
 
 
 def _csr(mat):
-    """scipy ``csr_matrix`` view of a PETSc ``Mat``'s values."""
+    """scipy ``csr_matrix`` view of a PETSc ``Mat``'s values, for the cheap
+    matvecs the apply path needs."""
     indptr, indices, data = mat.getValuesCSR()
     return sp.csr_matrix((data, indices, indptr), shape=mat.getSize())
 
 
 def _split_blocks(P, n0, n1):
-    """``(K, B, D)`` PETSc submatrices of a monolithic mixed matrix.
+    """``(K, B, D)`` PETSc submatrices of a monolithic mixed matrix: the primal
+    block, the coupling and the latent block.
 
-    Primal dofs come first and are contiguous (the lvpp ordering contract),
-    so the split is two index sets: ``[0, n0)`` and ``[n0, n0 + n1)``.
+    Primal dofs come first and are contiguous (the lvpp ordering contract), so
+    the split is two index sets: ``[0, n0)`` and ``[n0, n0 + n1)``.
     """
     is0 = PETSc.IS().createGeneral(np.arange(n0, dtype=np.int32), comm=P.comm)
     is1 = PETSc.IS().createGeneral(np.arange(n0, n0 + n1, dtype=np.int32),
@@ -138,7 +142,7 @@ def _split_blocks(P, n0, n1):
 
 
 def _primal_degree(space):
-    """``p`` of the hpG primal space ``CG_p`` (the element's degree)."""
+    """``p`` of the hpG primal space ``CG_p``, i.e. its element degree."""
     degree = space.ufl_element().degree()
     if isinstance(degree, tuple):        # tensor-product spellings
         degree = degree[0]
@@ -146,12 +150,13 @@ def _primal_degree(space):
 
 
 class _TrueSchur:
-    """PETSc MatShell context: the true Schur action ``S = D - B^T A^-1 B``.
+    """PETSc MatShell context holding the action of the true Schur complement
+    ``S = D - B^T A^-1 B``, the operator the inner GMRES solves with.
 
-    ``D``/``B`` are the per-setUp blocks and ``A^-1`` is the (cached or
-    capped) primal inverse; all three are read live from the owning
-    :class:`HPGTwoStage`, so a MatShell built once in ``install`` sees each
-    linearization's blocks.
+    ``D`` and ``B`` are the per-``setUp`` blocks and ``A^-1`` is the cached (or
+    capped CG) primal inverse; all three are read live from the owning
+    :class:`HPGTwoStage`, so a MatShell built once in ``install`` sees the
+    blocks of each linearization without being rebuilt.
     """
 
     def __init__(self, owner):
@@ -166,8 +171,9 @@ class _TrueSchur:
 class _ShatPC:
     """Inner PC: batched cellwise Cholesky solves of ``-Shat_c``.
 
-    ``shat_apply`` is ``-(Shat_nodal)^-1`` (``V (-Shat_modal)^-1 V^T``), the
-    inverse of the negative-definite Schur, so the apply is direct.
+    ``shat_apply`` is ``-(Shat_nodal)^-1`` (``V (-Shat_modal)^-1 V^T``), so
+    the apply is direct: it is the inverse of the negative-definite Schur up to
+    the cellwise approximation, and nothing is iterated here.
     """
 
     def __init__(self, owner):
@@ -184,36 +190,26 @@ class _ShatPC:
 
 
 class HPGTwoStage(PreconditionerBase):
-    """Sequential ``P_F`` (arXiv:2412.13733v4, eq. 4.5) on the mixed system.
+    """The sequential ``P_F`` preconditioner of hpG section 4.4, eq. (4.5), on
+    the mixed Newton system.
 
-    Parameters
-    ----------
-    inner_rtol, inner_maxit : float, int
-        Inner GMRES on the true Schur.  Defaults ``1e-4`` / ``40``: the
-        rewritten capped-inexact discipline (rescued the p=4 wedge).  The
-        paper-literal recorded arm is ``1e-6`` / ``500``.
-    beta : float
-        ``Shat`` regularization ``beta * M_c``; never in the operator (see
-        the module docstring).  The measured-viable default is ``0``.
-    a_action : ``"lu"`` or ``"gamg"``
-        How ``A(alpha)^-1`` is applied.  ``"lu"`` (default) factors the
-        alpha-free ``K0`` once per mesh with MUMPS.  ``"gamg"`` is the
-        matfree arm: capped CG + AMG on the same ``K0``, tunable via
-        ``a_rtol`` / ``a_maxit`` / ``a_pc``.
-    a_rtol, a_maxit : float, int
-        CG tolerance / iteration cap for ``a_action="gamg"``.
-    a_pc : str
-        PETSc PC type for that CG (``"gamg"`` or ``"hypre"``).
+    Constructed with no arguments it uses the shipped defaults, which are the
+    ones measured on the hpG benchmarks.  ``inner_rtol`` and ``inner_maxit``
+    govern the inner GMRES on the true Schur: 1e-4 and 40, the capped-inexact
+    discipline, against the paper-literal 1e-6 / 500 of the recorded ``p=2``
+    table.  ``beta`` regularizes ``Shat`` alone (``beta * M_c``) and never
+    enters the operator; the measured-viable default is 0.  ``a_action``
+    selects how ``A(alpha)^-1`` is applied: ``"lu"`` (the default) factors the
+    alpha-free ``K0`` once with MUMPS, while ``"gamg"`` is the matrix-free
+    option -- capped CG with AMG on the same ``K0``, tuned by ``a_rtol``,
+    ``a_maxit`` and ``a_pc`` (``"gamg"`` or ``"hypre"``).
 
-    Notes
-    -----
-    There is no module-global state: everything lives on the instance
-    (``install`` wires it, PETSc calls ``setUp`` once per linear solve and
-    ``apply`` once per outer Krylov iteration, ``finalize`` releases the
-    PETSc objects).  ``inner_its`` records the inner-GMRES iteration count of
-    every apply and ``a_its`` the CG count of every ``"gamg"`` A-solve; both
-    are diagnostics for callers (the rewrite dropped the archived
-    driver-side monkey-patching).
+    There is no module-global state: ``install`` wires the PETSc objects onto
+    the instance, PETSc calls the preconditioner once per linear solve through
+    ``setUp`` and once per outer Krylov iteration through ``apply``, and
+    ``finalize`` releases everything.  ``inner_its`` records the inner-GMRES
+    iteration count of every apply and ``a_its`` the CG count of every
+    ``"gamg"`` A-solve; both are diagnostics for callers.
     """
 
     def __init__(self, inner_rtol=1e-4, inner_maxit=40, beta=0.0,
@@ -270,10 +266,11 @@ class HPGTwoStage(PreconditionerBase):
     def install(self, snes, view):
         """Build the context and attach this object as the KSP's Python PC.
 
-        Sizes, the true-Schur MatShell, the inner GMRES and the per-apply
-        scratch vectors are built here; the alpha-free ``K0`` factorization
-        and the per-linearization blocks follow in the first ``setUp``,
-        which is the first point at which the assembled Pmat exists.
+        The sizes, the true-Schur MatShell, the inner GMRES and the scratch
+        vectors for the applies are built here.  The alpha-free ``K0``
+        factorization and the per-linearization blocks follow in the first
+        ``setUp``, which is the first point at which the assembled Pmat
+        exists.
         """
         if len(view.latent_spaces) != 1:
             raise ValueError(
@@ -316,8 +313,8 @@ class HPGTwoStage(PreconditionerBase):
 
         A lifted BC on unknown ``i`` lives on ``Z.sub(i)``; its node indices
         are global mixed-space dofs, so those of unknown 0 (the first
-        subspace) are exactly ``[0, n_primal)``.  Constraints outside the
-        primal block are not identity rows of ``K`` and are dropped here.
+        subspace) are exactly ``[0, n_primal)``.  A constraint outside the
+        primal block is not an identity row of ``K`` and is dropped here.
         """
         chunks = []
         for bc in view.bcs:
@@ -332,11 +329,12 @@ class HPGTwoStage(PreconditionerBase):
     # ------------------------------------------------- per-linearization hook
 
     def setUp(self, pc):
-        """PETSc calls this once per linear solve, i.e. per linearization.
+        """PETSc calls this once per linear solve, i.e. once per linearization.
 
         Reads the live ``alpha``, refreshes ``D_alpha``, re-splits the
-        assembled Pmat into its three blocks, re-factorizes ``Shat`` from the
-        current latent block, and (once per mesh) factors ``K0``.
+        assembled Pmat into its three blocks, rebuilds the cellwise ``Shat``
+        from the current latent block, and factors ``K0`` the first time it is
+        called.
         """
         alpha = float(self._view.alpha)
         self._alpha = alpha
@@ -356,8 +354,8 @@ class HPGTwoStage(PreconditionerBase):
         self._sg.build_shat(self._sg.cell_blocks(self._Dmat), beta=self.beta)
 
     def _set_blocks(self, Bm, Dm):
-        """Keep the latent block as a PETSc ``Mat`` (for ``cell_blocks``) and
-        a scipy ``csr_matrix`` view (for the matvecs)."""
+        """Keep the latent block both as a PETSc ``Mat``, which ``cell_blocks``
+        wants, and as a scipy ``csr_matrix`` view, which the matvecs want."""
         self._B = _csr(Bm)
         self._BT = self._B.T.tocsr()
         if self._Dmat is not None:
@@ -366,7 +364,8 @@ class HPGTwoStage(PreconditionerBase):
         self._D = _csr(Dm)
 
     def _refresh_scale(self, alpha):
-        """``D_alpha = diag(1/alpha interior, 1 on bc rows)``."""
+        """``D_alpha = diag(1/alpha interior, 1 on bc rows)``: the whole
+        alpha-dependence of the primal solve, applied as a vector scaling."""
         scale = np.ones(self._n0)
         scale[self._interior] = 1.0 / alpha
         self._scale = scale
@@ -374,11 +373,12 @@ class HPGTwoStage(PreconditionerBase):
     def _build_a(self, Km):
         """Factor the alpha-free ``K0 = diag(1/alpha interior, 1 bc) @ Km``.
 
-        ``diag(scale) A(alpha)`` is ``K`` on interior rows (the ``alpha``
-        cancels) and the identity ``E`` on BC rows, so ``K0`` does not depend
-        on the alpha it was built from.  ``scale`` is the ``D_alpha`` the
-        caller just refreshed for this linearization; it is used only to
-        build ``K0`` and never re-read.
+        On interior rows ``diag(scale) A(alpha)`` is ``K``, the ``alpha``
+        cancelling, and on BC rows it is the identity ``E``; ``K0`` therefore
+        does not depend on the alpha it was built from, and one factorization
+        serves the whole nonlinear solve.  ``scale`` is the ``D_alpha``
+        refreshed for this linearization; it is used only to build ``K0`` and
+        is never read again.
         """
         K0 = Km.copy()
         v = K0.createVecLeft()
@@ -407,7 +407,7 @@ class HPGTwoStage(PreconditionerBase):
     # ------------------------------------------------------------------ apply
 
     def apply(self, pc, x, y):
-        """One sequential ``P_F`` apply (eq. 4.5)."""
+        """One sequential ``P_F`` apply, the three steps of eq. (4.5)."""
         xr = x.getArray(readonly=True).copy()
         b_u, b_psi = xr[:self._n0], xr[self._n0:]
         t = self._Ainv(b_u)                       # A_alpha^-1 b_u
@@ -423,9 +423,10 @@ class HPGTwoStage(PreconditionerBase):
     def _Ainv(self, b):
         """``A(alpha)^-1 b = K0^-1 (D_alpha b)``.
 
-        For ``a_action="gamg"`` this is a *variable-accuracy* inner iteration
-        (the outer FGMRES tolerates that by design); ``a_its`` and
-        ``a_nonconv`` record its cost and whether it ever hit the cap.
+        One solve with the cached ``K0`` and a scaling by ``D_alpha``; for
+        ``a_action="gamg"`` it is only as accurate as ``a_rtol`` / ``a_maxit``
+        allow, which the outer FGMRES tolerates by design.  ``a_its`` records
+        its cost and ``a_nonconv`` whether it ever hit the cap.
         """
         self._av.setArray(np.ascontiguousarray(b * self._scale))
         self._kspA.solve(self._av, self._ax)
@@ -439,7 +440,8 @@ class HPGTwoStage(PreconditionerBase):
         return self._ax.getArray(readonly=True).copy()
 
     def _inner_solve(self, y_schur):
-        """Inner GMRES: ``S dpsi = y_schur`` with the cellwise Shat PC."""
+        """Inner GMRES: solve ``S dpsi = y_schur`` with the cellwise Shat PC,
+        i.e. the ``S^-1`` of eq. (4.5)."""
         self._wb.setArray(np.ascontiguousarray(y_schur))
         self._inner.solve(self._wb, self._wx)
         self.inner_its.append(int(self._inner.getIterationNumber()))
@@ -448,7 +450,8 @@ class HPGTwoStage(PreconditionerBase):
     # --------------------------------------------------------------- teardown
 
     def finalize(self):
-        """Release every PETSc object this preconditioner created."""
+        """Release every PETSc object this preconditioner created, and drop the
+        references to the saddle view and the spectral data."""
         for attr in ("_inner", "_matS", "_kspA", "_K0", "_Dmat",
                      "_av", "_ax", "_wb", "_wx"):
             obj = getattr(self, attr)

@@ -1,20 +1,25 @@
-"""End-to-end gate for the hpG two-stage solver (rewrite batch: twostage+solver).
+"""End-to-end run of the hpG two-stage solver on the uniform L0 p = 2 problem.
 
-Runs the ``RESULTS.md`` L0 p=2 uniform row end-to-end with the rewritten
-``HPG`` preset and ``HPGTwoStage`` preconditioner, on both recorded arms:
+Runs the uniform L0 p = 2 row of ``experiments/hpg/RESULTS.md`` with the
+:class:`lvpp.hpg.HPG` preset and the
+:class:`lvpp.hpg.HPGTwoStage` preconditioner, under both inner solver settings
+that are of interest:
 
   paper-literal  ``HPGTwoStage(inner_rtol=1e-6, inner_maxit=500)``
-  rewritten      ``HPGTwoStage()``  (rtol 1e-4, cap 40)
+  default        ``HPGTwoStage()``  (rtol 1e-4, cap 40)
 
-Recorded target (``RESULTS.md``, uniform L0 p2, paper-literal arm):
-prox 8, newton 23, err(u_h) 1.193e-3, outer FGMRES max 2,
-inner its/apply ~12.8 (first 5.4/7 -> deep 18/20).
+Reported target (``experiments/hpg/RESULTS.md``, uniform L0 p2, paper-literal
+inner settings): prox 8, newton 23, err(u_h) 1.193e-3, outer FGMRES max 2,
+inner its/apply ~12.8 (first 5.4/7 -> deep 18/20).  Only the paper-literal
+numbers are checked: prox exactly, err to a relative 1e-3 (the reported errors
+carry four significant figures) and the outer FGMRES maximum bounded by 4;
+everything else is printed for comparison.
 
 Env guard REQUIRED:
 
   PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
   OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
-  experiments/rewrite_checks/check_hpg.py
+  experiments/checks/check_hpg.py
 
 Serial only.
 """
@@ -30,7 +35,7 @@ from lvpp.hpg.solver import HPG
 from lvpp.hpg.spaces import HPGDiscretization
 from lvpp.hpg.twostage import HPGTwoStage
 
-# RESULTS.md uniform L0 p=2, two-stage (paper-literal) arm.
+# RESULTS.md uniform L0 p=2, two-stage with the paper-literal inner settings.
 RECORDED = {"prox": 8, "newton": 23, "err": 1.193e-3, "outer": 2, "inner": 12.8}
 ERR_REL_TOL = 1e-3          # recorded errors are quoted to 4 significant figs
 OUTER_MAX_TOL = 4           # recorded max is 2
@@ -99,7 +104,8 @@ def main():
     assert disc.primal.dim() == 1089, disc.primal.dim()
     assert disc.latent.dim() == 256, disc.latent.dim()
 
-    print(f"\n  recorded (RESULTS.md, paper-literal arm): prox={RECORDED['prox']} "
+    print(f"\n  recorded (RESULTS.md, paper-literal inner settings): "
+          f"prox={RECORDED['prox']} "
           f"newton={RECORDED['newton']} err={RECORDED['err']:.3e} "
           f"outer_max={RECORDED['outer']} inner={RECORDED['inner']}")
 
@@ -109,9 +115,9 @@ def main():
 
     default = HPGTwoStage()
     err_d, prox_d, newton_d, outer_d, pc_d = run(default, "hpg_default")
-    inner_d = report("rewritten", err_d, prox_d, newton_d, outer_d, pc_d)
+    inner_d = report("default", err_d, prox_d, newton_d, outer_d, pc_d)
 
-    print("\n=== assertions (on the recorded paper-literal arm) ===")
+    print("\n=== assertions (on the recorded paper-literal numbers) ===")
     failures = []
     if prox_l != RECORDED["prox"]:
         failures.append(f"prox {prox_l} != {RECORDED['prox']}")
@@ -127,7 +133,7 @@ def main():
         sys.exit(1)
     print(f"  PASS: prox={prox_l}, err within {ERR_REL_TOL:g} rel, "
           f"outer {outer_l} <= {OUTER_MAX_TOL}")
-    print(f"  (rewritten default arm: prox={prox_d}, newton={newton_d}, "
+    print(f"  (default settings: prox={prox_d}, newton={newton_d}, "
           f"err={err_d:.6e}, outer={outer_d}, inner={inner_d:.2f}/apply, "
           f"literal inner={inner_l:.2f}/apply)")
     print("\nHPG EXAMPLE OK")

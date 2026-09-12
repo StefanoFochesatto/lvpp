@@ -1,15 +1,22 @@
-"""Deprecated-path checks: the frozen archive's `psi_floor*` kwargs must still
-behave exactly as recorded.
+"""The ``psi_floor*`` keyword arguments of :class:`lvpp.LVPP`.
 
-(a) ``psi_floor=1e-2`` on the Schur configuration (the archive's
-    ``solver_parameters=SP_WINNER, psi_floor=1e-2`` pattern) still solves.
+Both checks reproduce what the older scripts in ``experiments/archive_2026-09/``
+record about the degeneracy floor:
+
+(a) ``psi_floor=1e-2`` together with the Schur-fieldsplit option dict (the
+    ``solver_parameters=SP_WINNER, psi_floor=1e-2`` pattern of those scripts)
+    still solves, and in the recorded 8 proximal iterations.
 (b) ``psi_floor_operator=True`` must FAIL: putting the floor on the operator
     itself violates the Jp-only rule and diverges at every level
     (``RESEARCH.md`` Finding 1).  This is a negative control for the
     ``operator_correction`` plumbing: if it stops failing, the operator
     correction is not reaching ``J``.
 
-Run with the env guard from the lvpp root.
+Run with the env guard from the repository root:
+
+    PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
+    OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
+    experiments/checks/check_deprecated_paths.py
 """
 
 import sys

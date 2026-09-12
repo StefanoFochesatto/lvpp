@@ -1,31 +1,21 @@
-"""``HPG``: the hpG preset -- a thin wrapper around :class:`LVPP`.
+"""``HPG``: the hpG preset -- discretization plus preconditioner.
 
 hpG is the *hierarchical Proximal-Galerkin* framework of Papadopoulos
-(arXiv:2412.13733): the same latent-variable proximal point loop as LVPP, on
-a ``CG_p x DQ_{p-2}`` tensor-product discretization, preconditioned by the
-cellwise spectral-Galerkin two-stage ``P_F``.  Formally it is **two orthogonal
-axes**:
+(arXiv:2412.13733): the same latent-variable proximal point loop as LVPP, on a
+``CG_p x DQ_{p-2}`` tensor-product discretization, preconditioned by the
+cellwise spectral-Galerkin two-stage ``P_F`` of section 4.4.  The
+discretization and the preconditioner are independent choices:
 
-===============  ==========================================  ==========================
-axis             choice                                      module
-===============  ==========================================  ==========================
-discretization   ``CG_p`` primal x ``DQ_{p-2}`` spectral      :mod:`lvpp.hpg.spaces`
-preconditioner   sequential ``P_F`` (eq. 4.5)                :mod:`lvpp.hpg.twostage`
-===============  ==========================================  ==========================
+    discretization   ``CG_p`` primal x ``DQ_{p-2}`` spectral   :mod:`lvpp.hpg.spaces`
+    preconditioner   sequential ``P_F`` (eq. 4.5)              :mod:`lvpp.hpg.twostage`
 
-This class is a *preset builder*: it picks both axes and hands them to
-:class:`~lvpp.solver.LVPP`.  It overrides **no algorithm step** -- not the
-proximal loop, not the schedule, not the stopping rule, not the Newton
-solver.  That is deliberate and is the executable test of the rewrite's
-decomposition (``LVPP_REWRITE_SPEC.md`` §0/§5.4): if it ever needed to override
-something beyond ``__init__``, an axis would have been mis-modeled, and the
-right fix would be a genuinely different algorithm subclass -- not edits
-here.
-
-The two axes compose: any LVPP user can pass
-``preconditioner=HPGTwoStage()`` to a plain LVPP (the preconditioner), or
-reach the discretization alone through :class:`~lvpp.hpg.spaces.HPGDiscretization`
-and drive it with their own preconditioner.
+The :class:`HPG` preset makes both choices for a caller and hands them to
+:class:`~lvpp.solver.LVPP`, whose every algorithmic step it leaves alone --
+the proximal loop, the alpha schedule, the stopping rule and the Newton solver
+are LVPP's.  Either choice is also usable on its own: any LVPP accepts
+``preconditioner=HPGTwoStage()``, and the discretization is reachable as
+:class:`~lvpp.hpg.spaces.HPGDiscretization` for a caller with their own
+preconditioner.
 """
 
 from lvpp.hpg.spaces import HPGDiscretization
@@ -36,11 +26,12 @@ __all__ = ["HPG"]
 
 
 def _as_discretization(discretization):
-    """``HPGDiscretization`` as-is, or ``(mesh, p)`` as the convenience pair.
+    """The ``HPGDiscretization`` itself, or ``(mesh, p)`` as the convenience pair.
 
-    The pair uses :meth:`HPGDiscretization._on`, the internal builder for an
-    already-built tensor-product mesh (``uniform``/``graded`` build their own
-    meshes, so neither applies to a caller's mesh).
+    A pair is built with :meth:`HPGDiscretization._on`, the constructor for a
+    tensor-product mesh the caller already has; :meth:`~HPGDiscretization.uniform`
+    and :meth:`~HPGDiscretization.graded` build their own meshes and so do not
+    apply here.
     """
     if isinstance(discretization, HPGDiscretization):
         return discretization
@@ -54,36 +45,57 @@ def _as_discretization(discretization):
 
 
 class HPG(LVPP):
-    """hpG preset: ``CG_p x DQ_{p-2}`` spectral with the two-stage ``P_F``.
+    """HPG applies the hpG discretization and two-stage preconditioner to the
+    LVPP proximal point loop; it is a preset, not a second solver.
 
-    Parameters
-    ----------
-    discretization : HPGDiscretization or (mesh, p)
-        The hpG spaces.  A ``(mesh, p)`` tuple is accepted for convenience
-        and builds ``HPGDiscretization`` on that tensor-product mesh.
-    u : Function
-        The primal unknown, living on ``discretization.primal`` (``CG_p``).
-    bounds : Constraint or (lower, upper)
-        As :class:`~lvpp.solver.LVPP`; the single obstacle ``(lb, None)`` in
-        the benchmark.
-    bcs : DirichletBC or list, optional
-        Essential BCs.
-    preconditioner : SaddlePreconditioner, optional
-        Defaults to :class:`~lvpp.hpg.twostage.HPGTwoStage` -- that is the
-        hpG axis.  Pass another preconditioner (e.g. a direct LU) to keep the
-        discretization and change the factorization.
-    **lvpp_kwargs
-        Forwarded verbatim to :class:`~lvpp.solver.LVPP`; every schedule and
-        stopping default is LVPP's.  The recorded hpG numbers use
-        ``alpha_schedule="double_exponential"``,
-        ``alpha_parameters={"alpha_max": 10.0}``, ``increment_norm="H1"`` and
-        ``solve(tol=1e-4)``.
+    An HPG object owns an :class:`~lvpp.hpg.spaces.HPGDiscretization`: the
+    tensor-product ``CG_p`` primal space carrying the obstacle unknown ``u``,
+    and the cellwise discontinuous ``DQ_{p-2}`` spectral latent space carrying
+    the multiplier ``psi`` (section 4.1 of hpG).  It hands that latent space to
+    LVPP and, unless the caller passes another one, installs the sequential
+    ``P_F`` preconditioner of hpG section 4.4 as
+    :class:`~lvpp.hpg.twostage.HPGTwoStage`.
 
-    Attributes
-    ----------
-    discretization : HPGDiscretization
-        The chosen spaces (``disc.primal`` / ``disc.latent``), so callers and
-        tests can reach them without rebuilding.
+    The discretization and the preconditioner are independent choices, which
+    is the central point about this preset.  The pair ``CG_p x DQ_{p-2}`` is
+    the inf-sup stable one (Lemma B.3 of Keith & Surowiec (2024)), and its
+    tensor-product cells are what make the latent operator cellwise; the
+    preconditioner may be replaced by any lvpp preconditioner -- a direct
+    factorization, say -- which keeps the hpG spaces and changes only how the
+    Newton systems are solved.
+
+    The public API of an HPG object is:
+
+      HPG(discretization, u, bounds, ...):  build the preset; ``discretization``
+            is an HPGDiscretization or a ``(mesh, p)`` pair, ``u`` lives on
+            ``discretization.primal``, ``bounds`` is a Constraint or a
+            ``(lower, upper)`` pair as for LVPP, and ``bcs`` are the essential
+            boundary conditions
+
+      solve():  run the LVPP proximal loop on these spaces; the recorded hpG
+            numbers use ``alpha_schedule="double_exponential"``,
+            ``alpha_parameters={"alpha_max": 10.0}``, ``increment_norm="H1"``
+            and ``solve(tol=1e-4)``
+
+      discretization:  the spaces actually in use, whose ``.primal`` and
+            ``.latent`` are reachable without rebuilding them
+
+    A typical call is:
+
+    .. code-block:: python3
+
+      disc = HPGDiscretization.uniform(16, 2)                  # CG_2 x DQ_0 spectral
+      u = Function(disc.primal)
+      solver = HPG(disc, u, bounds=(lb, None), energy=energy, bcs=bc,
+                   alpha_schedule="double_exponential",
+                   alpha_parameters={"alpha_max": 10.0},
+                   increment_norm="H1")
+      solver.solve(tol=1e-4)
+      print(solver.u_out[0])                                   # the reconstruction
+
+    Every remaining keyword argument is forwarded to
+    :class:`~lvpp.solver.LVPP` verbatim, so every schedule and stopping default
+    is LVPP's.
     """
 
     def __init__(self, discretization, u, bounds, *, bcs=None,

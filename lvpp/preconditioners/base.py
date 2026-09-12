@@ -1,36 +1,41 @@
-"""The saddle-point preconditioner seam.
+"""The saddle-point preconditioner interface.
 
-A :class:`SaddlePreconditioner` is everything :class:`lvpp.solver.LVPP` needs
-to know about how the mixed Newton system is (approximately) factored.  The
-solver owns the proximal loop, the mixed weak form, and the SNES; the
-preconditioner owns the PETSc options that factorize it and, if it needs more
-than options can express (a Python PC, a per-iterate cellwise factorization),
-it is handed a :class:`SaddleView` to wire itself up.
+A :class:`SaddlePreconditioner` is everything :class:`lvpp.solver.LVPP` needs to
+know about how the mixed Newton system is (approximately) factored.  The solver
+owns the proximal loop, the mixed weak form and the SNES; the preconditioner
+owns the PETSc options that factorize the mixed system and, when options cannot
+express what it wants (a Python PC, a per-iterate cellwise factorization), it
+is handed a :class:`SaddleView` to wire itself up.
 
-Why a view and not the solver
------------------------------
-The pre-rewrite hpG port reached into ``lvpp._solver.snes.ksp``,
-``lvpp._alpha``, ``lvpp._bcs``, ``lvpp._z``, ``lvpp._J`` and ``lvpp._spaces``
-from 13 experiment scripts.  Those accesses were the de-facto extension API.
-:class:`SaddleView` makes that API explicit and read-only, so a preconditioner
-never needs a reference to the solver object.
+The view, not the solver
+------------------------
+A preconditioner never needs a reference to the solver object.  The live mixed
+unknown, the proximal parameter, the multiplier fields, the spaces and the true
+Jacobian all arrive in a :class:`SaddleView`, which is read-only by
+construction; nothing else about the solver is exposed.  The older scripts in
+``experiments/archive_2026-09/`` reach for the same quantities through private
+attributes of the solver (``_solver.snes.ksp``, ``_alpha``, ``_bcs``, ``_z``,
+``_J`` and ``_spaces``), and the view makes that access explicit and read-only
+instead.
 
 Live objects, not copies
 ------------------------
 ``alpha`` is a :class:`~firedrake.Constant` and ``z``/``drift`` are
-:class:`~firedrake.Function` objects that the solver mutates in place.  A
-preconditioner may therefore cache the *reference* at ``install`` time and read
-current values in its own ``setUp`` (PETSc calls it once per linear solve, i.e.
-per Newton linearization).  This replaces the old ``alpha_getter`` callback.
+:class:`~firedrake.Function` objects that the solver mutates in place, so a
+preconditioner may cache the reference at :meth:`install` time and read current
+values in its own ``setUp``; PETSc calls that once per linear solve, hence once
+per Newton linearization.
 
 The Jp-only rule
 ----------------
-``jacobian`` is the **true** Jacobian ``J``; regularization/floors belong on
-the preconditioner Jacobian only, because the outer proximal point iteration
-needs exact Newton directions (measured: an operator-level floor fails at every
-mesh level, ``RESEARCH.md`` Finding 1).  A preconditioner that wants an extra
-term returns it from :meth:`SaddlePreconditioner.jacobian_correction` and the
-solver adds it to ``Jp`` alone.
+``jacobian`` is the **true** Jacobian ``J``.  A floor or regularization belongs
+on the preconditioner Jacobian ``Jp`` alone, never on ``J``: the outer proximal
+point iteration is a contractive fixed point map that needs exact Newton
+directions, and an operator-level floor perturbs those directions and is
+measured to fail at every mesh level (``RESEARCH.md`` Finding 1).  A
+preconditioner that wants an extra term returns it from
+:meth:`SaddlePreconditioner.jacobian_correction` and the solver adds it to
+``Jp`` alone.
 """
 
 import typing
@@ -47,23 +52,31 @@ __all__ = [
 class SaddleView:
     """Read-only handoff from :class:`~lvpp.solver.LVPP` to a preconditioner.
 
-    All object-valued fields are live: the solver mutates them in place, so a
-    cached reference stays current.  ``primal`` dofs are contiguous and come
-    first in the mixed space, then the latent blocks in ``constraint_unknowns``
-    order; ``n_primal`` is the offset (the hpG two-stage PC relies on it).
+    A view is what a preconditioner gets in place of the solver object.  It
+    carries the mixed unknown ``z``, the proximal parameter ``alpha``, the
+    multiplier fields, the spaces the blocks live on, the essential boundary
+    conditions and the true Jacobian.  All object-valued fields are live: the
+    solver mutates them in place, so a cached reference stays current and a
+    preconditioner may read the values afresh at each assembly.
+
+    The primal dofs are contiguous and come first in the mixed space, followed
+    by the latent blocks in ``constraint_unknowns`` order; ``n_primal`` is the
+    offset at which the latent blocks begin.  A preconditioner can therefore
+    index into ``split(z)`` without asking the solver for the block structure,
+    which is what the two-stage preconditioner hpG (4.5) does.
     """
 
     z: typing.Any
-    """The mixed unknown ``z = (u..., psi...)`` (live ``Function``)."""
+    """The mixed unknown ``z = (u..., psi...)`` (a live ``Function``)."""
 
     alpha: typing.Any
-    """The proximal parameter (live ``Constant``)."""
+    """The proximal parameter (a live ``Constant``)."""
 
     drift: tuple
-    """Per-latent-block multiplier ``(psi_prev - psi) / alpha`` (live Functions)."""
+    """Per latent block, the multiplier ``(psi_prev - psi) / alpha`` (live Functions)."""
 
     constraint_unknowns: tuple
-    """For each latent block, the index of the unknown it constrains."""
+    """For each latent block, the index of the user unknown it constrains."""
 
     primal_spaces: tuple
     """One ``FunctionSpace`` per user unknown."""
@@ -81,11 +94,13 @@ class SaddleView:
     """The ``Mesh``."""
 
     jacobian: typing.Any
-    """The true Jacobian as a UFL 2-form (never floored/regularized)."""
+    """The true Jacobian as a UFL 2-form (never floored or regularized)."""
 
     def constraint_measure(self, unknown: int):
-        """UFL measure on the mesh of unknown ``unknown`` (``dx`` with the
-        solver's form-compiler parameters)."""
+        """UFL measure ``dx`` on the mesh of the user unknown ``unknown``.
+
+        A correction term for a latent block is integrated over the region that
+        block constrains, whose mesh is the mesh of the primal unknown."""
         import ufl
         return ufl.Measure("dx", domain=self.primal_spaces[unknown].mesh())
 
@@ -93,58 +108,68 @@ class SaddleView:
 class SaddlePreconditioner(typing.Protocol):
     """How the mixed Newton system is approximately factored.
 
-    Implementations are ordinary objects (not necessarily PETSc types).  The
-    default, :class:`lvpp.preconditioners.direct.DirectFactorization`, does
-    everything through ``parameters()``; preconditioners that need a Python PC
-    implement ``install``.
+    Implementations are ordinary objects, not necessarily PETSc types.  Only
+    :meth:`parameters` is needed in practice: the default,
+    :class:`lvpp.preconditioners.direct.DirectFactorization`, does everything
+    through it.  A preconditioner that must touch PETSc objects, or assemble
+    something per iterate, also implements :meth:`install`, and one that wants
+    an extra term on the preconditioner Jacobian implements
+    :meth:`jacobian_correction`.
     """
 
     def parameters(self) -> dict:
         """PETSc SNES/KSP/PC options for this preconditioner.
 
-        Merged as ``{**DEFAULT_SOLVER_PARAMETERS, **parameters(), **user}``,
-        so an explicit user ``solver_parameters`` dict still wins.
+        They are merged as ``{**DEFAULT_SOLVER_PARAMETERS, **parameters(),
+        **user}``, so an explicit user ``solver_parameters`` dict still wins.
         """
         ...
 
     def jacobian_correction(self, view: SaddleView):
-        """Return a 2-form added to ``Jp`` only, or ``None``.
+        """Return a 2-form to be added to ``Jp`` alone, or ``None``.
 
-        The form must be built over the mixed trial/test functions of
-        ``view.z``'s space.  Default: no correction.
+        The term lands on the preconditioner Jacobian only, as the Jp-only rule
+        in the module docstring requires.  The form must be built over the
+        mixed trial and test functions of ``view.z``'s space.  Default: no
+        correction.
         """
         return None
 
     def operator_correction(self, view: SaddleView):
-        """Legacy diagnostic: return a 2-form added to ``J`` *itself*, or ``None``.
+        """Return a 2-form to be added to ``J`` *itself*, or ``None``.
 
-        Only ``DegeneracyFloor(on_operator=True)`` uses this; it violates the
-        Jp-only rule and is measured to fail at every mesh level
-        (``RESEARCH.md`` Finding 1).  It exists so the rewritten library can
-        still reproduce that negative result.  Default: no correction.
+        This exists to demonstrate why the Jp-only rule holds, not to be used.
+        Only ``DegeneracyFloor(on_operator=True)`` returns a form here, for
+        which the solver sets ``Jp = J = J_eff`` (and, in that case, discards
+        any ``jacobian_regularization``).  An operator-level floor is measured
+        to fail at every mesh level (``RESEARCH.md`` Finding 1), because the
+        outer proximal point iteration then takes inexact Newton directions, so
+        this diagnostic is off by default.  Default: no correction.
         """
         return None
 
     def install(self, snes, view: SaddleView) -> None:
         """Wire up anything ``parameters()`` cannot express.
 
-        Called once, after the SNES is constructed and before the first solve.
-        Default: no-op.
+        Called once, after the SNES is constructed and before the first solve;
+        this is where a preconditioner caches the live view references it needs
+        in its own ``setUp``.  Default: no-op.
         """
 
     def finalize(self) -> None:
         """Release any PETSc objects this preconditioner created.
 
-        Called by :meth:`LVPP.close`; safe to call before ``install``.
+        Called by :meth:`LVPP.close`, and safe to call before ``install``.
         """
 
 
 class JacobianCorrection:
-    """Adapter turning the legacy ``jacobian_regularization=`` callable into a
-    preconditioner-side correction.
+    """Adapter turning the ``jacobian_regularization=`` callable accepted by
+    :class:`~lvpp.solver.LVPP` into a preconditioner-side correction.
 
-    The original hook had signature ``f(z, z_test, z_trial) -> 2-form``; the
-    rewrite keeps that user-facing callable and wraps it here.
+    The callable has signature ``f(z, z_test, z_trial) -> 2-form``, a UFL form
+    over the mixed space written by the user; this wrapper supplies the test and
+    trial functions of ``view.z``'s space and hands the result back for ``Jp``.
     """
 
     def __init__(self, fn):
@@ -157,9 +182,11 @@ class JacobianCorrection:
 
 
 class PreconditionerBase:
-    """No-op defaults for everything except :meth:`parameters`.
+    """No-op defaults for every method except :meth:`parameters`.
 
-    Concrete preconditioners subclass this; they only override what they use.
+    Concrete preconditioners subclass this and override only what they use, so
+    one that needs no correction, no PETSc wiring and nothing to release is a
+    single ``parameters()`` method.
     """
 
     def parameters(self) -> dict:
@@ -176,4 +203,3 @@ class PreconditionerBase:
 
     def finalize(self) -> None:
         return None
-

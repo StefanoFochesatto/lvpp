@@ -1,27 +1,30 @@
-"""Gate: the matfree hpG arm (``a_action="gamg"``).
+"""The matrix-free A-action of the hpG two-stage preconditioner.
 
-The archived ``experiments/hpg/matfree_hpG.py`` removes every *global*
-factorization from the hpG solve path: the cached MUMPS-LU of the alpha-free
-``K0`` is replaced by a capped CG + AMG solve on the same ``K0``.  Everything
-else (true-Schur matvec, cellwise ``Shat`` Cholesky, inner GMRES, ``E_beta``
-decoupling) is unchanged.  In the rewritten library that arm is
-``HPGTwoStage(a_action="gamg")``.
+With ``a_action="gamg"`` the hpG solve path carries no *global*
+factorization: the cached MUMPS-LU of the alpha-free ``K0`` is replaced by a
+capped CG + AMG solve on the same ``K0``, as in the older
+``experiments/hpg/matfree_hpG.py``.  Everything else (true-Schur matvec,
+cellwise ``Shat`` Cholesky, inner GMRES, ``E_beta`` decoupling) is unchanged,
+and the A-CG budget defaults (``a_rtol=1e-8``, ``a_maxit=60``) are the ones
+those scripts use.
 
-This pins the two claims that make it usable:
+Two claims make the option usable, and both are checked here:
 
-  1. the matfree arm reaches the SAME solution as the cached-LU arm at L0 p=2
-     (the archive's claim: identical prox/err, only the A-action differs);
-  2. it stays clean on a graded mesh (no divergence, no A-CG solve hitting
-     its iteration cap) -- the archive's graded48/80 stages.
+  1. it reaches the same solution as the cached-LU factorization at L0 p = 2
+     (identical prox/err, only the A-action differs);
+  2. it stays clean on a graded mesh (no divergence, no A-CG solve hitting its
+     iteration cap), on the graded 26.4x chain.
 
-Recorded context (``RESULTS.md``): "the matfree arm is bit-consistent with
-RESULTS.md's claim" from a throwaway smoke; this script makes it a committed
-gate.  A-CG budget defaults (``a_rtol=1e-8``, ``a_maxit=60``) are the
-archive's.
+``RESULTS.md`` reports the matrix-free A-action as consistent with the cached
+factorization; this script turns that into a committed check.  A saturated
+A-CG solve on the graded mesh is printed rather than asserted: the outer
+FGMRES absorbs a variable-accuracy A-action by design.
 
-Run (optionally ``l0`` / ``graded``):
-    PETSC_DIR=... PETSC_ARCH=arch-firedrake-default OMP_NUM_THREADS=1 \
-        python experiments/rewrite_checks/check_hpg_matfree.py [l0 graded]
+Run from the repository root (optionally with a subset, e.g. ``l0 graded``):
+
+    PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
+    OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
+    experiments/checks/check_hpg_matfree.py [l0 graded]
 """
 
 import sys
@@ -95,7 +98,7 @@ def main():
     failures = []
 
     if "l0" in which:
-        print("=== L0 p=2 uniform: cached-LU arm vs matfree arm ===")
+        print("=== L0 p=2 uniform: cached-LU vs matrix-free A-action ===")
         disc = HPGDiscretization.uniform(16, 2)
         lu = run(disc, dict(a_action="lu"), "mf_l0_lu")
         mf = run(disc, dict(a_action="gamg"), "mf_l0_gamg")
@@ -108,10 +111,11 @@ def main():
         if mf["a_nonconv"] != 0:
             failures.append(f"L0: {mf['a_nonconv']} non-converged A-CG solves")
         if not mf["a_calls"] or not mf["a_action"] == "gamg":
-            failures.append("L0: the matfree arm recorded no A-CG solves")
+            failures.append("L0: the matrix-free option recorded no A-CG solves")
 
     if "graded" in which:
-        print("=== graded 26.4x, p=2: matfree arm, A-tolerance sensitivity ===")
+        print("=== graded 26.4x, p=2: matrix-free A-action, A-tolerance"
+              " sensitivity ===")
         print("  (a saturated A-CG solve is reported, not asserted: the outer"
               " FGMRES absorbs a variable-accuracy A-action by design)")
         disc = HPGDiscretization.graded(64, 2, 26.414)
@@ -132,7 +136,7 @@ def main():
             print("  -", f)
         sys.exit(1)
     print("\nHPG MATFREE OK (no global factorization in the apply path; "
-          "same solution as the cached-LU arm, clean on grading)")
+          "same solution as the cached LU, clean on grading)")
 
 
 if __name__ == "__main__":

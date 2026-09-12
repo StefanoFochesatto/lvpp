@@ -3,24 +3,22 @@
 Two orthogonal strategies drive :meth:`lvpp.solver.LVPP.solve`:
 
 * :class:`AlphaSchedule` -- the proximal parameter ``alpha_k`` of the mixed
-  system (paper eq. 2.7).  :func:`make_schedule` resolves the pre-rewrite
+  system (2.7a)-(2.7b) of LVPP.  :func:`make_schedule` resolves the
   ``alpha_rule`` entry point (the names ``"constant"``, ``"geometric"``,
   ``"linear"``, ``"double_exponential"``, ``"newton_adaptive"``, or a user
-  callable) into one of the frozen dataclasses below; :func:`describe`
+  callable) into one of the immutable dataclasses below, and :func:`describe`
   reproduces the description used by the verbose line.
 * :class:`StoppingRule` -- when the outer iteration has converged.
-  :class:`PrimalIncrement` is the recorded LVPP default; :class:`AlphaPlateau`
-  is the hpG paper's criterion and an opt-in configuration.
+  :class:`PrimalIncrement` is the LVPP default; :class:`AlphaPlateau` is the
+  termination rule used by the examples of hpG and is an opt-in choice.
 
-Fidelity
---------
-Every schedule is the pre-rewrite arithmetic, copied verbatim from
-``lvpp.lvpp._make_alpha_rule``.  In particular
-:meth:`DoubleExponential.__call__` is paper eq. (3.8) evaluated in log space,
-which is what keeps the default ``r = q = 1.5`` from overflowing to ``inf``
-near ``k ~ 19``.  The originals hoisted ``math.log`` out of the closure; the
-dataclasses recompute it per call, which is bit-identical (``math.log`` is
-deterministic) and costs nothing at one call per proximal iteration.
+An alpha schedule is the paper's freedom in choosing ``alpha_k``: it sees the
+1-based iteration index, the parameter of the previous iteration, and the
+Newton count of the previous proximal solve, and it returns the parameter for
+the next one.  :meth:`DoubleExponential.__call__` is eq. (3.8) of LVPP, and it
+is evaluated in log space: the naive ``C * r**(q**k)`` overflows to ``inf``
+near ``k ~ 19`` for the defaults ``r = q = 1.5``, whereas the log form stays
+finite until ``alpha_max`` saturates it.
 """
 
 import math
@@ -87,8 +85,9 @@ class Geometric:
 class Linear:
     """``alpha_1 = alpha0``, then ``alpha_k = min(c * alpha_{k-1}, C_max)``.
 
-    A ramp of ratio ``c``, monotone once capped; ``alpha0 = 2**-7, c = sqrt(2),
-    C_max = 2**-3`` is the hpG paper's §6.1-6.2 sequence.
+    A geometric ramp of ratio ``c`` that turns constant once it reaches
+    ``C_max``; the values ``alpha0 = 2**-7``, ``c = sqrt(2)``, and
+    ``C_max = 2**-3`` are the capped sequence used in §6.1-6.2 of hpG.
     """
 
     alpha0: float = 1.0
@@ -105,10 +104,12 @@ class Linear:
 class DoubleExponential:
     """``alpha_k = min(max(C*r**(q**k) - alpha_prev, C), alpha_max)``.
 
-    This is paper eq. (3.8).  It is evaluated in log space because
-    ``C * r**(q**k)`` overflows naive Python floats near ``k ~ 19`` for the
-    defaults ``r = q = 1.5``; the ``y > 700`` and ``log_term < 700`` branches
-    are the overflow guards, and the result saturates at ``alpha_max``.
+    This is eq. (3.8) of LVPP: the schedule has an exponent ``q**k`` nested
+    inside the exponent ``r**(q**k)``, so alpha grows doubly exponentially and
+    saturates at ``alpha_max``.  It is evaluated in log space because
+    ``C * r**(q**k)`` overflows a Python float near ``k ~ 19`` for the defaults
+    ``r = q = 1.5``; the ``y > 700`` and ``log_term < 700`` branches are the
+    guards that keep the intermediate finite.
     """
 
     C: float = 1.0
@@ -119,8 +120,8 @@ class DoubleExponential:
     def __call__(self, k: int, alpha_prev: float, newton_its: int) -> float:
         """Return the double-exponential value at iteration ``k``.
 
-        The double exponential is the exponent ``q**k`` *inside* the exponent
-        ``r**(q**k)``, which is what makes the log-space evaluation necessary.
+        The nested exponent is what forces the log-space evaluation; the
+        subtraction of ``alpha_prev`` is part of the published rule.
         """
         logC = math.log(self.C)
         logq = math.log(self.q)
@@ -177,24 +178,20 @@ ALPHA_RULE_DEFAULTS = {
     name: {field.name: field.default for field in fields(rule_cls)}
     for name, rule_cls in _RULES.items()
 }
-"""Per-rule default parameters, identical to the pre-rewrite
-``lvpp.lvpp._ALPHA_RULE_DEFAULTS`` (derived from the dataclasses so the two
-cannot drift apart)."""
+"""Per-rule default parameters, read off the fields of the rule dataclasses so
+that the defaults and the constructors cannot drift apart."""
 
 
 def make_schedule(rule, params=None):
     """Resolve ``rule`` into an :class:`AlphaSchedule`.
 
-    ``rule`` is either
-
-    * a rule name -- one of the keys of :data:`ALPHA_RULE_DEFAULTS` -- in which
-      case ``params`` overrides that rule's defaults (an unknown parameter name
-      raises ``TypeError``, since the fields of the rule dataclass are fixed);
-    * an :class:`AlphaSchedule` instance or any other callable
-      ``f(k, alpha_prev, newton_its) -> alpha``, returned as is (``params`` is
-      ignored).
-
-    An unrecognized name raises :class:`ValueError`.
+    ``rule`` is either a rule name -- a key of :data:`ALPHA_RULE_DEFAULTS` --
+    in which case that rule's defaults are used and ``params`` overrides them
+    (an unknown parameter name raises ``TypeError``, since the fields of the
+    rule dataclass are fixed), or an :class:`AlphaSchedule` instance or any
+    other callable ``f(k, alpha_prev, newton_its) -> alpha``, which is returned
+    unchanged with ``params`` ignored.  An unrecognized name raises
+    :class:`ValueError`.
     """
     if callable(rule):
         return rule
@@ -261,14 +258,16 @@ class AlphaPlateau:
 
     The criterion is ``k >= 2 and alpha == alpha_prev``, optionally restricted
     to a ``target`` value (``alpha == target``); with ``target=None`` any
-    plateau triggers, which is the paper's literal ``alpha_k = alpha_{k-1}``.
+    plateau triggers, which is the literal ``alpha_k = alpha_{k-1}``.  The
+    sequence is capped (see :class:`Linear`), so a plateau arrives after
+    finitely many steps; this is the termination rule used by the examples of
+    hpG.
 
-    Caveat (spec §4.1).  The paper's literal criterion is under reconciliation:
-    it reaches its plateau within a few steps, yet §6.2 reports 24 Newton
-    iterations over the whole run, which the two do not obviously reconcile.
-    This rule is therefore a configuration option for the paper-faithful hpG
-    preset; it is **not** the recorded default.  The numbers in the measured
-    record use :class:`PrimalIncrement`.
+    Caveat.  That plateau arrives within a few steps, yet §6.2 of hpG reports
+    24 Newton iterations over the whole run, which the two do not obviously
+    reconcile.  The rule is therefore an option for the paper-faithful preset
+    rather than the recorded default; the measured records use
+    :class:`PrimalIncrement`.
     """
 
     target: float | None = None

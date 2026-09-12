@@ -1,60 +1,88 @@
-"""Per-cell spectral-Galerkin machinery for the hpG Shat preconditioner.
+"""Per-cell spectral-Galerkin algebra for the hpG Shat preconditioner.
 
-Dimension-generic replacement for ``experiments/hpg/hpg_shat.py``: everything
-is expressed with ``d = mesh.topological_dimension()`` in (1, 2, 3) on
-tensor-product cells, and the 2D reduction is exactly the old ``Afull`` /
-``Bhat`` / ``Mdiag``.
+These routines assemble and apply the cellwise factors of the two-stage
+preconditioner for the latent variable proximal point (LVPP) method of
+Dokken, Farrell, Keith, Papadopoulos, & Surowiec (2025), in the spectral
+cell solver of Papadopoulos (2026) = hpG.  The construction is dimension
+generic: the only thing it asks of the mesh is
+``d = mesh.topological_dimension()``, taken to be 1, 2 or 3, and the cells
+are Cartesian tensor products.  The two- and three-dimensional cases carry
+the weight of the code; one dimension is the base of the tensor product,
+where every closed form collapses to a diagonal.  The two-dimensional blocks
+agree with the older 2D scripts in experiments/archive_2026-09/.
 
-The Y basis (paper arXiv:2412.13733v4, sec 4.5)
-----------------------------------------------
-    Y_n = P_n - P_{n+2}          (vanishes at the cell endpoints; = Jacobi
-                                  P^{(1,1)} up to scaling)
-    Y_n' = -(2n+3) P_{n+1}   =>   int Y_n' Y_m' = 2(2n+3) delta_nm
+The Y basis
+-----------
+The latent variable is expanded in the hierarchical basis
+    Y_n = P_n - P_{n+2},
+with P_n the Legendre polynomial, as in section 4.5 of hpG.  Each Y_n
+vanishes at both endpoints of the reference interval -- Y_n is the Jacobi
+polynomial P^{(1,1)}_n up to scaling -- so the family spans the same modal
+space as DG while carrying the cell trace to zero.  Differentiating gives
+    Y_n' = -(2n+3) P_{n+1},
+and therefore
+    int Y_n' Y_m' = 2(2n+3) delta_nm,
+so the one-dimensional stiffness of Y is diagonal.  The mass is a different
+story: the Y family is orthogonal with respect to the weight 1 - x^2, not
+with respect to dx, so its mass carries a band at offset +/-2 (see
+``y_mass_full_1d``).  That asymmetry reaches every corner of the module.  In one
+dimension the per-cell stiffness Ahat_c in the Y basis is exactly diagonal.
+For d >= 2 it is only block diagonal, split into 2^d classes indexed by the
+parities of the multi-indices: the "4N blocks" of section 4.5 of hpG in two
+dimensions, and eight such classes in three.  The code keeps the dense k x k
+block of every cell (k = (q+1)^d, at most nine at p <= 4 in 2D and
+twenty-seven at p = 4 in 3D) and checks the structure numerically rather
+than storing it.
 
-so the 1D **stiffness** of Y is diagonal.  Its 1D **mass** is NOT diagonal in
-dx -- the Y family is orthogonal w.r.t. the weight (1-x^2), not dx -- and has a
-+-2 band (``y_mass_full_1d``).  Hence the per-cell stiffness ``Ahat_c`` in the
-Y basis is *diagonal when d = 1*, but for d >= 2 only BLOCK-diagonal with
-``2^d`` parity classes per cell (the paper's "4N blocks in 2D").  The d = 3
-count of 8 is an inference from the same parity argument [INFERENCE].  We keep
-the dense k x k block (k = (q+1)^d; k <= 9 at p <= 4 in 2D, k <= 27 at p = 4
-in 3D) and *verify* the structure rather than storing it.
-
-The Gram ``Bhat`` between Phi (Y basis) and Psi (Legendre-modal DG_{p-2}) is a
-tensor product of the 1D upper-triangular coupling matrix
+The Gram and the coupling
+-------------------------
+The Gram matrix Bhat between Phi, the Y basis, and Psi, the Legendre-modal
+discontinuous space DG_{p-2}, is a tensor product of the one-dimensional
+upper-triangular coupling
     G[n, m] = int Y_n P_m = 2/(2n+1) delta_nm - 2/(2n+5) delta_{m,n+2}.
-Shat per cell (modal Psi basis):
+With D_c the latent block of the Jacobian and M_c the latent mass, the
+cellwise factor of the second stage is
     -Shat_c = D_c + beta * M_c + Bhat_c^T Ahat_c^-1 Bhat_c,
-factorized cellwise (batched Cholesky of the SPD matrix -Shat_c).
+the discrete form of hpG (4.6); it is factorized cell by cell with a batched
+Cholesky of the symmetric positive definite -Shat_c.
 
-Psi space in Firedrake: ``DQ`` (variant "spectral") = tensor-product Legendre
-per cell (basis functions) with a NODAL dual (point evaluation at the
-Gauss-Legendre points).  (On intervals FInAT rejects the ``DQ`` alias
-outright -- "DQ is supported, but handled incorrectly" -- so 1D uses the
-``DG`` spectral alias, the same element; see ``_latent_family``.)  So
-``Function.dat`` holds nodal values; it is NOT
-modal coefficients, and the modal <-> nodal maps are the Vandermonde
-transforms V (k x k), DISCOVERED numerically (probe interpolation on a
-one-cell mesh) and verified against Firedrake-assembled mass/Gram/stiffness
-blocks:
-    nodal = V^T @ modal,   modal = (V^T)^-1 @ nodal.
-Canonical flat ordering: ``flat = sum_a idx_a * (q+1)**(d-1-a)``, i.e. the
-first axis is the outermost index; for d = 2 this is the old ``a*(q+1) + b``.
+The Psi space in Firedrake
+--------------------------
+``DQ`` with ``variant="spectral"`` is the tensor-product Legendre basis with
+a nodal dual: its functionals are point evaluations at the Gauss-Legendre
+nodes, and Firedrake uses that dual as the basis functions.  Hence
+``Function.dat`` holds nodal values rather than modal coefficients.  The two
+are linked by the Vandermonde transforms V (k x k),
+    nodal = V^T @ modal,   modal = (V^T)^-1 @ nodal,
+which are found numerically by probing interpolation on a one-cell mesh (see
+``discover_vandermonde``) and checked against the analytic tensor product of
+``legval`` at the Gauss nodes and against Firedrake-assembled mass, Gram and
+stiffness blocks.  On intervals FInAT rejects the ``DQ`` alias -- it reports
+"DQ is supported, but handled incorrectly" -- so one dimension asks for the
+``DG`` spectral alias, which is the same element in everything that matters
+here; see ``_latent_family``.
 
-Per-cell blocks (cell extents h_1..h_d, ``hprod = prod_j h_j``):
+Canonical flat ordering
+-----------------------
+For a multi-index (idx_0, ..., idx_{d-1}) the flat index is
+    flat = sum_a idx_a * (q+1)**(d-1-a),
+so the first axis is the outermost index; in two dimensions this is the
+familiar a*(q+1) + b.
+
+Per-cell blocks
+---------------
+With h_1..h_d the cell extents and hprod = prod_j h_j,
     Ahat_c  = alpha * (hprod / 2**d) * sum_i (2/h_i)**2
-              * kron(... SY1 on axis i, MY1 on axis j != i ...)
-            = alpha * sum_i (hprod / h_i**2) * 2**(2-d) * kron(...)
+              * kron(MY1, ..., SY1 on axis i, ..., MY1)
     Bhat_c  = (hprod / 2**d) * kron(G1, ..., G1)
-    Mdiag_c = (hprod / 2**d) * kron(diag(dp), ..., diag(dp)), flattened
-
-The ``(hprod / 2**d) * (2/h_i)**2`` factor is the *physical* cell stiffness
-(reference measure times the affine pullback of the i-th derivative); at
-d = 2 it is exactly the old ``hy/hx`` / ``hx/hy``.  The naive generalisation
-of that 2D expression, ``prod_{j != i} h_j / h_i``, agrees with it only at
-d = 2 and is a factor ``2**(d-2)`` too large elsewhere -- it is not the
-operator that ``Bhat^T Ahat^-1 Bhat`` requires (both matrix and Gram must
-carry the same reference measure), and the assembled cell stiffness in
+    Mdiag_c = (hprod / 2**d) * kron(diag(dp), ..., diag(dp)), flattened.
+The factor (hprod / 2**d) * (2/h_i)**2 is the physical cell stiffness: the
+reference measure times the affine pullback of the i-th derivative, which in
+two dimensions is the hy/hx and hx/hy of the older scripts.  The naive
+generalisation of that 2D expression, prod_{j != i} h_j / h_i, agrees with
+it only at d = 2 and is a factor 2**(d-2) too large elsewhere; it is not the
+operator that Bhat^T Ahat^-1 Bhat requires, since the matrix and the Gram
+must carry the same reference measure.  The cell stiffness assembled in
 :meth:`SpectralGalerkin.verify_vs_firedrake` pins the physical one.
 """
 
@@ -74,26 +102,32 @@ _TENSOR_PRODUCT_CELLS = ("interval", "quadrilateral", "hexahedron")
 
 
 def _topological_dimension(mesh):
-    """``d`` of ``mesh``; Firedrake exposes it as an int or as a method."""
+    """The topological dimension d of ``mesh``.
+
+    Firedrake exposes it either as a plain attribute or as a method, with
+    both spellings occurring across releases, so accept whichever is there.
+    """
     td = mesh.topological_dimension
     return int(td()) if callable(td) else int(td)
 
 
 def _latent_family(d):
-    """Firedrake family name of the DQ spectral element.
+    """Firedrake family name of the spectral DQ element in dimension d.
 
-    On intervals FInAT rejects the ``DQ`` alias outright ("DQ is supported,
-    but handled incorrectly"); ``DG`` there is the same tensor-product
-    discontinuous Legendre element with a nodal dual.
+    On intervals FInAT rejects the ``DQ`` alias outright -- it reports "DQ is
+    supported, but handled incorrectly" -- so one dimension asks for ``DG``,
+    which is the same tensor-product discontinuous Legendre element with a
+    nodal dual.
     """
     return "DG" if d == 1 else "DQ"
 
 
 def _cell_name(mesh):
-    """Cell name of ``mesh``, or None if the attribute is absent.
+    """Cell name of ``mesh``, or None when no spelling of it is available.
 
-    Across Firedrake versions this is a method, a property, or missing
-    entirely; fall back to the UFL cell, which has the same two spellings.
+    Across Firedrake releases the name is a method, a property, or absent
+    altogether; fall back to the UFL cell, which offers the same two
+    spellings.
     """
     for obj, attr in ((mesh, "cell_name"), (mesh.ufl_cell(), "cellname")):
         getter = getattr(obj, attr, None)
@@ -105,12 +139,18 @@ def _cell_name(mesh):
 
 # ------------------------------------------------------------------ 1D algebra
 def legendre_mass_1d(q):
-    """int P_m^2 on [-1,1], m = 0..q."""
+    """int P_m^2 dx = 2/(2m+1) on [-1,1], for m = 0..q."""
     return 2.0 / (2.0 * np.arange(q + 1) + 1.0)
 
 
 def y_mass_full_1d(q):
-    """Full 1D mass of Y: diag 2/(2n+1)+2/(2n+5) plus +-2 band -2/(2n+5)."""
+    """Full 1D mass matrix of the Y family.
+
+    The diagonal is 2/(2n+1) + 2/(2n+5) and the only off-diagonal entries
+    form a band at offset +/-2 with value -2/(2n+5).  The band is the price
+    of orthogonality with respect to the weight 1 - x^2 instead of dx, and
+    it is what forces the 2D stiffness to split into parity blocks.
+    """
     n = np.arange(q + 1)
     M = np.diag(2.0 / (2.0 * n + 1) + 2.0 / (2.0 * n + 5))
     for i in range(q - 1):
@@ -119,12 +159,21 @@ def y_mass_full_1d(q):
 
 
 def y_stiff_full_1d(q):
-    """int Y_n' Y_m' = 2(2n+3) delta_nm (Y_n' = -(2n+3) P_{n+1})."""
+    """int Y_n' Y_m' = 2(2n+3) delta_nm, from Y_n' = -(2n+3) P_{n+1}.
+
+    The derivative Gram of the Y family is diagonal, in contrast with the
+    mass just above.
+    """
     return np.diag(2.0 * (2.0 * np.arange(q + 1) + 3))
 
 
 def y_legendre_gram_1d(q):
-    """G[n, m] = int Y_n P_m ds, n, m = 0..q (upper triangular)."""
+    """G[n, m] = int Y_n P_m, for n, m = 0..q, upper triangular.
+
+    Expanding Y_n = P_n - P_{n+2} and using int P_n P_m = 2/(2n+1) delta_nm
+    leaves the diagonal 2/(2n+1) together with the band -2/(2n+5) two
+    columns to its right.
+    """
     G = np.diag(2.0 / (2.0 * np.arange(q + 1) + 1))
     for i in range(q - 1):
         G[i, i + 2] = -2.0 / (2 * i + 5)
@@ -132,7 +181,11 @@ def y_legendre_gram_1d(q):
 
 
 def y_to_legendre_1d(q):
-    """cy[n, k]: coefficient of P_k in Y_n, n = 0..q, k = 0..q+2."""
+    """Coefficients cy[n, k] of P_k in Y_n, for n = 0..q.
+
+    Each row holds a 1 at k = n and a -1 at k = n+2, which is the expansion
+    Y_n = P_n - P_{n+2}; the columns run out to k = q+2.
+    """
     cy = np.zeros((q + 1, q + 3))
     for i in range(q + 1):
         cy[i, i] = 1.0
@@ -160,7 +213,11 @@ def numeric_1d_matrices(q, nq=None):
 
 
 def legendre_ufl_1d(a, s):
-    """UFL expression for P_a(s), a <= 4."""
+    """UFL expression for P_a(s) when a <= 4, written out explicitly.
+
+    The low-order Legendre polynomials are spelled out so they can be
+    interpolated as UFL expressions; any larger degree raises.
+    """
     import ufl
     if a == 0:
         return 0 * s + 1.0
@@ -177,16 +234,20 @@ def legendre_ufl_1d(a, s):
 
 # ------------------------------------------------------- canonical indexing
 def _multi_indices(q, d):
-    """(k, d) multi-index array in canonical flat order.
+    """(k, d) array of multi-indices in canonical flat order.
 
-    ``np.indices`` ravels C-order, so the last axis varies fastest -- exactly
-    ``flat = sum_a idx_a * (q+1)**(d-1-a)``.  For d = 2 this is ``a*(q+1)+b``.
+    ``np.indices`` ravels in C order, so the last axis varies fastest, which
+    is exactly flat = sum_a idx_a * (q+1)**(d-1-a); in two dimensions that
+    is a*(q+1) + b.
     """
     return np.indices((q + 1,) * d).reshape(d, -1).T
 
 
 def _flatten(multi, base, d):
-    """Canonical flat index of a single multi-index, on a ``base``-ary grid."""
+    """Canonical flat index of one multi-index on a base-ary grid.
+
+    The first axis is the outermost digit, matching ``_multi_indices``.
+    """
     out = 0
     for a in range(d):
         out = out * base + int(multi[a])
@@ -194,7 +255,11 @@ def _flatten(multi, base, d):
 
 
 def _kron_chain(mats):
-    """Tensor product with the FIRST factor outermost (matches the flat order)."""
+    """Tensor product of matrices with the FIRST factor outermost.
+
+    The ordering matches the canonical flat index, so a Kronecker product of
+    1D matrices acts axis by axis on the flattened multi-index.
+    """
     out = mats[0]
     for m in mats[1:]:
         out = np.kron(out, m)
@@ -221,15 +286,15 @@ def _one_cell_mesh(d, halfwidth, center):
 
 
 def discover_vandermonde(q, d=2, halfwidth=1.0, center=1.0):
-    """Discovered modal<->nodal transform of the DQ_q spectral element.
+    """Discover the modal<->nodal transform of the DQ_q spectral element.
 
-    Interpolates the tensor-product probe ``prod_a P_{idx_a}(s_a)`` into a
-    ONE-cell mesh; ``dat_j`` = probe value at the dual node of firedrake-local
-    dof j (the DQ spectral variant has a point-evaluation dual at the
-    Gauss-Legendre nodes).  Returns V with ``V[flat(idx), j] = probe value``,
-    so ``nodal = V^T @ modal``; the flat index is canonical
-    (``sum_a idx_a * (q+1)**(d-1-a)``).  The determinant is cross-checked
-    against the analytic ``kron`` of ``legval(gauss, I)``.
+    The tensor-product probe prod_a P_{idx_a}(s_a) is interpolated into a
+    one-cell mesh, and ``dat_j`` then holds the probe value at the dual node
+    of the Firedrake-local dof j -- the DQ spectral variant has a
+    point-evaluation dual at the Gauss-Legendre nodes.  The returned V has
+    V[flat(idx), j] = probe value, so that nodal = V^T @ modal, with the
+    canonical flat index.  The determinant of the discovered V is checked
+    against the analytic tensor product of ``legval`` at the Gauss nodes.
     """
     from firedrake import Function, FunctionSpace, SpatialCoordinate
     mesh = _one_cell_mesh(d, halfwidth, center)
@@ -258,8 +323,9 @@ def discover_vandermonde(q, d=2, halfwidth=1.0, center=1.0):
 class CellGeometry:
     """Per-cell extents of an axis-aligned tensor-product mesh.
 
-    ``h`` is ``(ncells, d)``; ``hx``/``hy`` are the per-axis views kept for
-    back-compatibility with the 2D harness (``d >= 2``).
+    ``h`` has shape (ncells, d), and ``hx`` and ``hy`` are per-axis views
+    kept for the older 2D scripts in experiments/archive_2026-09/; the
+    latter is present only when d >= 2.
     """
 
     def __init__(self, mesh):
@@ -278,8 +344,13 @@ class CellGeometry:
 
 
 def blocks_from_petsc(mat, perm_r, perm_c, krow, kcol):
-    """Per-cell dense blocks of a cell-block-diagonal PETSc Mat, given
-    cell-major row/column permutations: (ncells, krow, kcol)."""
+    """Dense per-cell blocks of a cell-block-diagonal PETSc Mat.
+
+    The row and column permutations list the dofs cell-major, so that dof
+    (c, i) sits at c*krow + i; reordering the assembled matrix accordingly
+    lets each cell's krow x kcol block be copied out.  An assertion rejects
+    any matrix that couples two different cells.
+    """
     indptr, indices, data = mat.getValuesCSR()
     M = sp.csr_matrix((data, indices, indptr), shape=mat.getSize())
     Mp = M[perm_r][:, perm_c].tocoo()
@@ -292,12 +363,42 @@ def blocks_from_petsc(mat, perm_r, perm_c, krow, kcol):
 
 
 class SpectralGalerkin:
-    """Per-cell hpG spectral-Galerkin data on Psi = DQ_{p-2} spectral.
+    """Per-cell spectral-Galerkin data for the hpG latent block on the space
+    Psi = DQ_{p-2} with ``variant="spectral"``.
 
-    Per-cell blocks: (ncells, k, k) with ``k = (q+1)**d``, cells cell-major in
-    FIREDRAKE's local dof order (nodal dual).  Modal conversion via the
-    discovered Vandermonde V: ``nodal = V^T modal``, ``modal = solve(V^T,
-    nodal)``.
+    The object holds the cell geometry, the closed-form per-cell blocks in
+    the Y basis, and the modal conversion through the discovered Vandermonde
+    matrix V.  Per-cell arrays have shape (ncells, k, k) with k = (q+1)^d
+    and are ordered cell-major in Firedrake's local dof order, which is
+    nodal because of the point-evaluation dual.  Nodal and modal values are
+    related by nodal = V^T modal and modal = solve(V^T, nodal).
+
+    Its public methods are:
+
+      cell_blocks():  per-cell nodal blocks of a cell-block-diagonal PETSc Mat
+
+      to_modal():  batched conversion of nodal cell blocks to modal ones
+
+      build_shat():  batched Cholesky of the modal -Shat_c, the cellwise factor of the two-stage preconditioner
+
+      shat_apply():  apply -(Shat_nodal)^-1 cellwise, on nodal values
+
+      gather(), scatter():  move a global vector to and from cell-major order
+
+      verify_vs_firedrake():  check the closed-form cellwise structures against assembled references
+
+    A typical use builds the data once on the latent space W and reuses the
+    factorization over several solves:
+
+    .. code-block:: python3
+
+      sg = SpectralGalerkin(mesh, W, p, alpha)
+      sg.build_shat(D_nodal, beta=beta)
+      y = sg.shat_apply(x_nodal)
+
+    The class is dimension generic: all of the above holds for d = 1, 2 and
+    3 on tensor-product cells, with the Y structure collapsing to a diagonal
+    in one dimension.
     """
 
     def __init__(self, mesh, W, p, alpha):
@@ -316,7 +417,7 @@ class SpectralGalerkin:
         self.h, self.ncells = geo.h, geo.ncells
         self.hprod = np.prod(self.h, axis=1)
         self.hx = geo.hx
-        if d >= 2:                       # 2D harness back-compat
+        if d >= 2:                       # 2D scripts in experiments/archive_2026-09/
             self.hy = geo.hy
         cmap = W.cell_node_map().values
         self.cmap = cmap
@@ -327,7 +428,7 @@ class SpectralGalerkin:
         self.perm_can = cmap.reshape(-1)
         self.V = discover_vandermonde(q, d)
         self.Vinv = np.linalg.inv(self.V)
-        # 1D pieces (closed forms, quadrature-verified)
+        # 1D pieces, closed form and checked by quadrature
         self.dp = legendre_mass_1d(q)
         self.MY1 = y_mass_full_1d(q)
         self.SY1 = y_stiff_full_1d(q)
@@ -357,20 +458,35 @@ class SpectralGalerkin:
 
     # ------------------------------------------------------------- assembly
     def cell_blocks(self, Dmat):
-        """Per-cell dense NODAL blocks of a cell-block-diagonal latent-block
-        matrix (PETSc Mat on W): (ncells, k, k)."""
+        """Per-cell dense nodal blocks of a cell-block-diagonal latent matrix.
+
+        ``Dmat`` is a PETSc Mat on W, assembled in Firedrake's global dof
+        order; the result is (ncells, k, k) in the same cell-major order
+        used everywhere else in the class.
+        """
         return blocks_from_petsc(Dmat, self.perm_can, self.perm_can,
                                  self.k, self.k)
 
     def to_modal(self, NodalBlocks):
-        """modal_c = V Nodal_c V^T (batched)."""
+        """Convert per-cell nodal blocks to modal ones.
+
+        Applies the similarity transform modal_c = V Nodal_c V^T to every
+        cell at once, through the discovered Vandermonde matrix.
+        """
         return np.einsum("ij,cjk,lk->cil", self.V, NodalBlocks, self.V)
 
     def build_shat(self, D_nodal, beta=0.0, check=False):
-        """Batched Cholesky of -Shat_c (modal) = -D_jac + beta M_c + Bhat^T
-        Ahat^-1 Bhat, where D_nodal is the latent block OF THE JACOBIAN
-        (= -D_psi in the lvpp/lower-bound sign convention; hpG: -Shat =
-        D_psi + beta M + coupling).  SPD for D_psi PSD."""
+        """Build and factor the modal -Shat_c of every cell.
+
+        The cellwise block is
+            -Shat_c = -D_jac + beta M_c + Bhat_c^T Ahat_c^-1 Bhat_c
+        (hpG (4.6)), where ``D_nodal`` is the latent block of the Jacobian;
+        that is -D_psi in the lvpp/lower-bound sign convention, the same
+        quantity hpG writes as -Shat = D_psi + beta M + coupling.  The modal
+        Cholesky is stored for ``shat_apply``.  The block is symmetric
+        positive definite whenever D_psi is positive semi-definite.  With
+        ``check`` the smallest eigenvalue is computed as well.
+        """
         self.beta = float(beta)
         D_modal = self.to_modal(D_nodal)
         X = np.linalg.solve(self.Afull, self.Bhat)     # Ahat^-1 Bhat
@@ -386,8 +502,13 @@ class SpectralGalerkin:
 
     # ------------------------------------------------------------- applies
     def shat_apply(self, X_nodal):
-        """Batched solve -(Shat_nodal_c)^-1 X: (ncells, k) -> (ncells, k).
-        -(Shat_nodal)^-1 = V (-(Shat_modal))^-1 V^T."""
+        """Apply -(Shat_nodal)^-1 to one nodal vector per cell.
+
+        Uses the identity -(Shat_nodal)^-1 = V (-Shat_modal)^-1 V^T: the
+        input is mapped to modal values with V^T, the two triangular systems
+        of the stored Cholesky factor are solved cellwise, and the result is
+        mapped back with V.
+        """
         Xmod = np.einsum("ji,cj->ci", self.V, X_nodal)     # V^T x (modal)
         L = self.shat_chol
         y = np.stack([
@@ -406,11 +527,11 @@ class SpectralGalerkin:
 
     # --------------------------------------------------------- verification
     def _parity_classes(self):
-        """Parity class of each canonical flat index (``2**d`` classes).
+        """Parity class of each canonical flat index, one of 2**d values.
 
-        Only used for d >= 2; at d = 1 there is a single class and the
-        verification instead demands that EVERY off-diagonal entry of Ahat
-        vanishes (the paper's "Ahat is diagonal when d = 1").
+        Used only for d >= 2.  In one dimension there is a single class, and
+        the verification instead demands that every off-diagonal entry of
+        Ahat vanishes -- the diagonal structure hpG records for d = 1.
         """
         d, q = self.d, self.q
         idx = _multi_indices(q, d)
@@ -420,8 +541,8 @@ class SpectralGalerkin:
         return par
 
     def verify_vs_firedrake(self):
-        """Check closed-form per-cell structures against Firedrake-assembled
-        references.  Returns dict of max abs deviations (see stage0_gate)."""
+        """Check the closed-form cellwise structures against assembled
+        references.  Returns dict of max abs deviations (see the caller)."""
         from firedrake import (FunctionSpace, TestFunction, TrialFunction,
                                assemble, dx, grad, inner)
         d, q = self.d, self.q

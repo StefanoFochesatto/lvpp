@@ -1,30 +1,18 @@
-"""Build the mixed LVPP system (LVPP paper, eq. 2.7) from a user problem.
+"""Build the mixed LVPP system (eq. 2.7 of LVPP) from a user problem.
 
-This module owns everything *structural*: input normalization, the mixed
-function space ``Z = U_1 x ... x U_n x W_1 x ... x W_m``, the residual ``F``
-and Jacobian ``J``, and the diagnostic forms.  It deliberately knows nothing
-about how the system is solved (see :mod:`lvpp.solver`) or preconditioned
-(see :mod:`lvpp.preconditioners`).
+This module owns everything structural: it normalizes the user's input, forms
+the mixed function space ``Z = U_1 x ... x U_n x W_1 x ... x W_m`` with one
+primal block per user unknown and one latent block per constraint, and
+accumulates the residual ``F``, its Jacobian ``J``, and the diagnostic forms.
+It deliberately knows nothing about how the system is solved (see
+:mod:`lvpp.solver`) or how its Newton systems are approximately factored (see
+:mod:`lvpp.preconditioners`).
 
-Dof ordering contract
----------------------
-All primal dofs come first (unknown 0, then unknown 1, ...), followed by the
-latent blocks in ``constraint_unknowns`` order.  Every block-structured
-preconditioner relies on this; ``n_primal = sum(V.dim() for V in primal
-spaces)`` is the offset of the first latent dof.
-
-Two row families
-----------------
-At proximal iteration ``k``, the residual is
-
-    alpha_k <J'(u^k), v> + (psi^k, B v) - (psi^{k-1}, B v) = 0     (2.7a)
-    (B u^k, w) - (grad R*(psi^k), w)                        = 0     (2.7b)
-
-i.e. one row per user unknown plus one *state* row per constraint.  A
-constraint contributes both rows through
-:meth:`~lvpp.constraints.Constraint.coupling_form` (the ``B v`` term, with its
-proximal shift) and :meth:`~lvpp.constraints.Constraint.state_form` (the
-``grad R*`` term).
+Every block-structured factorization relies on the dof ordering: all primal
+dofs come first, in the order of the unknowns, followed by the latent blocks in
+``constraint_unknowns`` order.  ``n_primal = sum(V.dim() for V in primal
+spaces)`` is the offset of the first latent dof, which is what a preconditioner
+uses to split the two families.
 """
 
 from dataclasses import dataclass
@@ -60,9 +48,9 @@ def _as_form(f, what="residual"):
 def _normalize_residual(residual, spaces):
     """Return (per-unknown 1-forms, mixed_flag).
 
-    ``mixed_flag`` marks the single-form-with-mixed-test case, which is
-    rewritten wholesale (its mixed test argument becomes the solver's mixed
-    test function, landing the user's rows on the unknown blocks).
+    ``mixed_flag`` marks the single-form-with-mixed-test case: one form carries
+    all the unknowns, and its mixed test argument is replaced by the solver's
+    mixed test function so the user's rows land on the unknown blocks.
     """
     n = len(spaces)
     if isinstance(residual, (list, tuple)):
@@ -84,9 +72,9 @@ def _normalize_residual(residual, spaces):
         raise ValueError("residual must be a 1-form, or a list of 1-forms, one per unknown")
     test = F.arguments()[0]
     tspace = test.function_space()
-    # firedrake mixed spaces wrap to WithGeometry like any other space;
-    # discriminate via the UFL element type (ufl moved MixedElement around
-    # between versions, so match on the class name)
+    # firedrake mixed spaces wrap to WithGeometry like any other space; the
+    # UFL element type tells them apart, matched on the class name because
+    # MixedElement has sat in different ufl modules across versions
     if (n > 1 and type(tspace.ufl_element()).__name__ == "MixedElement"
             and len(tspace) == n):
         return [F], True
@@ -239,9 +227,28 @@ def build_spec(energy=None, residual=None, u=None, bounds=None, bcs=None,
 class MixedSystem:
     """The static mixed weak form plus the live mixed unknown.
 
-    Constructed once; :meth:`refresh_reconstructions` and the diagnostic
-    helpers are called per proximal iteration.  Nothing here allocates PETSc
-    objects, so the whole class is safe to unit-test without a solver.
+    The residual has two families of rows.  At proximal iteration ``k`` there
+    is one primal row per user unknown, built from the user's energy or
+    residual and shifted by the proximal term,
+
+        alpha_k <J'(u^k), v> + (psi^k, B v) - (psi^{k-1}, B v) = 0     (2.7a)
+
+    and one state row per constraint, which drives the latent variable to the
+    point where its reconstruction matches the constrained unknown,
+
+        (B u^k, w) - (grad R*(psi^k), w) = 0                           (2.7b)
+
+    A constraint contributes to both families through
+    :meth:`~lvpp.constraints.Constraint.coupling_form` (the ``B v`` term and
+    its proximal shift, row (2.7a)) and
+    :meth:`~lvpp.constraints.Constraint.state_form` (the ``grad R*`` term, row
+    (2.7b)).  The primal blocks of ``Z`` come first, one per user unknown in
+    order, and the latent blocks follow in ``constraint_unknowns`` order.
+
+    Constructed once; :meth:`refresh_reconstructions`, the drift capture, and
+    the diagnostic helpers are called per proximal iteration.  Nothing here
+    allocates PETSc objects, so the whole class can be exercised without a
+    solver.
     """
 
     def __init__(self, spec, increment_norm="L2", name="lvpp"):
@@ -259,19 +266,19 @@ class MixedSystem:
         # --- mixed space and live pieces ------------------------------------
         self.Z = MixedFunctionSpace(list(spaces) + list(latent_spaces))
         self.z = Function(self.Z, name=f"{name}:z")
-        self.subfunctions = self.z.subfunctions  # live views; stay current
+        self.subfunctions = self.z.subfunctions  # live views, so they track z
         self.mapping = {ui: split(self.z)[i] for i, ui in enumerate(spec.u)}
-        # QVI-type bounds (data referencing user unknowns) see the current
-        # iterate through these remapped copies.
+        # bounds whose data reference the user unknowns (QVI type) see the
+        # current iterate through these remapped copies
         self.constraints = [c.remap(self.mapping) for c in spec.constraints]
 
         # --- scratch state ---------------------------------------------------
         self.u_prev = [Function(V) for V in spaces]
         self.psi_prev = [Function(W) for W in latent_spaces]
         self.z_backup = Function(self.Z)
-        # per-accepted-iterate dual lambda_j = (psi_prev - psi)/alpha: the
-        # discrete multiplier (persists on the contact set at the fixed point
-        # because psi itself drifts to -infinity there).  Created here so a
+        # per-iteration dual lambda_j = (psi_prev - psi)/alpha, the discrete
+        # multiplier: at the fixed point it persists on the contact set because
+        # psi itself drifts to -infinity there.  Created here so a
         # preconditioner's floor form can reference it; updated in place.
         self.drift = [Function(W, name=f"{name}:drift_{j}")
                       for j, W in enumerate(latent_spaces)]
@@ -287,7 +294,7 @@ class MixedSystem:
             else:
                 raise ValueError(f"{bc!r} does not live on any unknown's function space")
 
-        # --- mixed weak form (paper eq. 2.7) ---------------------------------
+        # --- mixed weak form: rows (2.7a) and (2.7b) -------------------------
         zt = TestFunction(self.Z)
         ztr = TrialFunction(self.Z)
         if spec.energy is not None:
@@ -316,7 +323,7 @@ class MixedSystem:
         self.z_test = zt
         self.z_trial = ztr
 
-        # --- increment and diagnostic forms (static; values live) -----------
+        # --- increment and diagnostic forms: built once, evaluated per iterate
         def _increment_sq(expr, V):
             e = inner(expr, expr)
             if increment_norm == "H1":
@@ -401,15 +408,24 @@ class MixedSystem:
     # -------------------------------------------------------- diagnostics
 
     def primal_increment(self):
+        """Norm of ``u^k - u^{k-1}`` over all unknowns (L2 or H1 per
+        ``increment_norm``); this is what :class:`~lvpp.schedules.PrimalIncrement`
+        tests for convergence."""
         return float(sum(_assemble(f) for f in self.primal_increment_forms)) ** 0.5
 
     def latent_increment(self):
+        """Norm of the change ``grad R*(psi^k) - grad R*(psi^{k-1})`` in the
+        reconstructed (observable) latent variable."""
         return float(sum(_assemble(f) for f in self.latent_increment_forms)) ** 0.5
 
     def energy_value(self):
+        """The user energy at the current iterate, or ``None`` for a problem
+        given as a residual."""
         return None if self.energy_form is None else float(_assemble(self.energy_form))
 
     def feasibility_value(self):
+        """Total integral primal constraint violation, summed over the
+        constraints; it is zero exactly when the iterate is admissible."""
         n = self.spec.n_unknowns
         total = 0.0
         for j, i in enumerate(self.spec.constraint_unknowns):
@@ -419,6 +435,8 @@ class MixedSystem:
         return float(total)
 
     def complementarity_value(self):
+        """Total complementarity measure, which vanishes at the solution of the
+        variational inequality."""
         total = 0.0
         for f in self.diag_complementarity_forms:
             if f is not None:
@@ -426,6 +444,8 @@ class MixedSystem:
         return float(total)
 
     def dual_feasibility_value(self):
+        """Total dual-feasibility measure, i.e. how far the latent variables
+        still sit from the multiplier at the solution; it vanishes there."""
         total = 0.0
         for f in self.diag_dual_forms:
             if f is not None:
@@ -433,7 +453,10 @@ class MixedSystem:
         return float(total)
 
     def reconstruct(self, j):
-        """A fresh ``grad R*(psi_j)`` copy (the bound-preserving ``u_tilde``)."""
+        """A fresh copy of ``grad R*(psi_j)`` on the observable space, the same
+        quantity the state row (2.7b) drives.  This is the bound-preserving
+        ``u_tilde``: ``grad R*`` maps into the interior of the admissible set,
+        so the reconstruction is pointwise feasible for any ``psi``."""
         n = self.spec.n_unknowns
         c_raw = self.spec.constraints[j]
         out = Function(self.recon[j].function_space(),

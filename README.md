@@ -1,28 +1,30 @@
-# lvpp — latent variable proximal point for variational inequalities
+# lvpp: latent variable proximal point for variational inequalities
 
 `lvpp` solves finite-element variational problems with pointwise inequality
 constraints (obstacles, box bounds, gradient bounds, simplex constraints) on
-Firedrake, using the latent variable proximal point (LVPP) algorithm of
+Firedrake.  The algorithm is the latent variable proximal point (LVPP) method
+of
 
     J. S. Dokken, P. E. Farrell, B. Keith, I. P. A. Papadopoulos, and
     T. M. Surowiec, "The latent variable proximal point algorithm for
-    variational problems with inequality constraints", arXiv:2503.05672 (2025).
+    variational problems with inequality constraints", CMAME 445:118181
+    (2025); arXiv:2503.05672.
 
-Each constrained unknown gets a latent variable `psi`; a mixed Newton system is
-solved at each outer (proximal) iteration, and the bound-preserving output
-`u_tilde = grad R*(psi)` is feasible pointwise by construction for any alpha.
-The number of proximal iterations is mesh-independent.
+Every constrained unknown carries a latent variable `psi`, and each proximal
+iteration solves the mixed Newton system (2.7a)-(2.7b) of that paper.  The
+bound-preserving output is the reconstruction `u_tilde = grad R*(psi)`, which
+is feasible pointwise by construction for any alpha.  The number of proximal
+iterations is independent of the mesh.
 
-`lvpp.hpg` additionally implements the hierarchical proximal Galerkin (hpG)
-solver of
+`lvpp.hpg` holds the hierarchical proximal Galerkin (hpG) preset of
 
     I. P. A. Papadopoulos, "Hierarchical proximal Galerkin: a fast hp-FEM
     solver for variational problems with pointwise inequality constraints",
-    arXiv:2412.13733 (2026)
+    arXiv:2412.13733 (2026).
 
-as a preset: the same proximal loop and saddle system, discretized with
-`CG_p x DQ_{p-2}` spectral hierarchical elements and factored with the paper's
-two-stage `P_F` preconditioner.
+It is the same proximal loop and the same saddle system, discretized with
+`CG_p x DQ_{p-2}` spectral hierarchical elements on tensor-product cells and
+factored with the two-stage `P_F` preconditioner of that paper (eq. 4.5).
 
 ## Install
 
@@ -68,27 +70,28 @@ diagnostics (`feasibility()`, `complementarity()`, `dual_feasibility()`).
 (`HPGDiscretization.graded(n, p, ratio)`) and 1D/3D (`dim=1, 3`); hpG requires
 tensor-product cells (interval, quadrilateral, hexahedron).
 
-### The matfree A-action
+### The matrix-free A-action
 
 `HPGTwoStage` applies `A(alpha)^-1` either from a cached MUMPS factorization of
-the alpha-free `K0` (default, `a_action="lu"`) or, for the matfree arm of
-`experiments/hpg/matfree_hpG.py`, from a **capped CG + AMG solve on the same
-`K0`** — which removes every global factorization from the apply path (the
-cellwise `Shat` Cholesky and the preconditioner assembly are local and stay):
+the alpha-free `K0` (default, `a_action="lu"`) or, with `a_action="gamg"`, from
+a **capped CG + AMG solve on the same `K0`** — the matrix-free option, which
+leaves no global factorization on the apply path (the cellwise `Shat` Cholesky
+and the preconditioner assembly are local):
 
     HPG(disc, u, bounds, preconditioner=HPGTwoStage(a_action="gamg"))
 
-Measured by `experiments/rewrite_checks/check_hpg_matfree.py`:
+Measured by `experiments/checks/check_hpg_matfree.py`:
 
-* **uniform meshes: identical to the cached arm** — L0 p=2 gives prox 8,
-  newton 22, `err = 1.191910e-03` for both, with A-CG 14.7 its/call (max 16)
-  and zero non-converged solves;
+* **uniform meshes: identical to the cached-factorization path** — L0 p=2 gives
+  prox 8, newton 22, `err = 1.191910e-03` for both, with A-CG 14.7 its/call
+  (max 16) and zero non-converged solves;
 * **graded meshes: the A-solve saturates its cap** — on a 26.4x graded mesh, at
   `a_rtol=1e-8` all 569 A-CG calls hit the 60-iteration cap; loosening to
-  `a_rtol=1e-6` leaves 60 of 602 saturated.  The outer FGMRES still converges
-  (2–3 its) and the result is close but not identical to the cached arm
-  (prox 10 vs 8, `err 1.03e-4` vs `9.9e-5`).  AMG on a strongly graded
-  stiffness matrix is simply weak here; `a_rtol` / `a_maxit` are the knobs.
+  `a_rtol=1e-6` leaves 60 of 602 saturated.  The outer FGMRES converges
+  (2–3 its) and the result is close to, but not identical with, the
+  cached-factorization path (prox 10 vs 8, `err 1.03e-4` vs `9.9e-5`).  AMG on
+  a strongly graded stiffness matrix is weak here; `a_rtol` / `a_maxit` are the
+  knobs.
 
 ## Layout
 
@@ -99,7 +102,7 @@ Measured by `experiments/rewrite_checks/check_hpg_matfree.py`:
 | `lvpp/schedules.py` | alpha schedules and stopping rules (`PrimalIncrement`, `AlphaPlateau`) |
 | `lvpp/constraints.py` | `Constraint` interface and `BoxConstraint` |
 | `lvpp/legendre.py` | Legendre functions (Shannon, Fermi-Dirac, Hellinger, Gibbs simplex) |
-| `lvpp/preconditioners/` | the saddle-point preconditioner seam: `DirectFactorization`, `DegeneracyFloor`, `SchurFieldsplit`, `RawOptions` |
+| `lvpp/preconditioners/` | the saddle-point preconditioner interface: `DirectFactorization`, `DegeneracyFloor`, `SchurFieldsplit`, `RawOptions` |
 | `lvpp/hpg/` | the hpG preset: spaces, per-cell spectral-Galerkin algebra, two-stage preconditioner |
 | `lvpp/benchmarks.py` | shared analytic sphere-obstacle data |
 
@@ -116,21 +119,20 @@ The mixed Newton system is factored through a small strategy interface
 
 Floors and other regularizations live on the preconditioner Jacobian `Jp`
 only, never on the operator `J`: the outer proximal point iteration needs
-exact Newton directions (`DegeneracyFloor(on_operator=True)` is kept as a
-documented diagnostic and is measured to fail).
+exact Newton directions (`DegeneracyFloor(on_operator=True)` is a documented
+diagnostic and is measured to fail).
 
-## Compatibility
+## Keyword spellings
 
-`lvpp` models one problem class in one class, but the recorded research in
-`experiments/` and `RESEARCH.md` was written against an earlier, monolithic
-`lvpp/lvpp.py`.  The deprecated keyword arguments `psi_spaces=`, `alpha_rule=`,
-`psi_floor=`, `psi_floor_drift=`, `psi_floor_operator=` and
-`jacobian_regularization=` still work (with a `DeprecationWarning`) so those
-scripts remain executable; the private attributes they read (`lvpp._z`,
-`lvpp._alpha`, `lvpp._solver`, ...) are kept as aliases for the same reason.
-New code should use `latent_spaces=`, `alpha_schedule=`, a preconditioner, and
-the public handles (`snes`, `ksp`, `pc`, `matrix()`, `constraints`,
-`primal_spaces`, `bcs`, `alpha_constant`, `install_monitor`).
+The preferred keywords are `latent_spaces=`, `alpha_schedule=`, and
+`preconditioner=`; the earlier spellings `psi_spaces=`, `alpha_rule=`,
+`psi_floor=`, `psi_floor_drift=`, `psi_floor_operator=`, and
+`jacobian_regularization=` are also accepted, and raise a
+`DeprecationWarning`.  Scripts that read the mixed state directly through the
+private attributes (`lvpp._z`, `lvpp._alpha`, `lvpp._solver`, ...) are
+unaffected; the public handles (`snes`, `ksp`, `pc`, `matrix()`, `constraints`,
+`primal_spaces`, `bcs`, `alpha_constant`, `install_monitor`) are the supported
+surface.
 
-See `LVPP_REWRITE_SPEC.md` for the design and `experiments/rewrite_checks/` for
-the gates that pin this rewrite to the recorded numbers.
+See `LVPP_DESIGN.md` for the design, and `experiments/checks/` for the checks
+that pin the recorded numbers.

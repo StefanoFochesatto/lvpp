@@ -1,21 +1,16 @@
-"""Preconditioners for the mixed saddle system -- the solver's PC seam.
+"""Preconditioners for the mixed saddle system.
 
-``LVPP(preconditioner=...)`` accepts four things, all normalized by
-:func:`resolve_preconditioner`:
+``LVPP(preconditioner=...)`` accepts four forms, and
+:func:`resolve_preconditioner` normalizes all of them.  ``None`` gives
+:class:`DirectFactorization`, the default.  A string names a registered
+preconditioner (see :data:`PRECONDITIONERS`).  A dict is taken as raw PETSc
+options and wrapped in :class:`RawOptions`.  An object with a callable
+``parameters`` is returned unchanged.
 
-===============  ==================================================
-input            result
-===============  ==================================================
-``None``         :class:`DirectFactorization` (the default)
-``"schur"``      a registered name (see :data:`PRECONDITIONERS`)
-a ``dict``       :class:`RawOptions` -- legacy "just solver options"
-an instance      returned as-is, if it has a callable ``parameters``
-===============  ==================================================
-
-A preconditioner owns the PETSc options that factorize the mixed Newton
-system and, when options cannot express it, a :class:`SaddleView` to wire
-itself up.  See :mod:`lvpp.preconditioners.base` for the seam itself, and
-``LVPP_REWRITE_SPEC.md`` §4.3 for why it exists.
+A preconditioner owns the PETSc options that factorize the mixed Newton system
+and, when options cannot express what it needs, a
+:class:`~lvpp.preconditioners.base.SaddleView` through which it wires itself up.
+See :mod:`lvpp.preconditioners.base` for the interface itself.
 
 Nothing here imports Firedrake at module load: the UFL/geometry work happens
 inside the methods that need it.
@@ -55,8 +50,9 @@ PRECONDITIONERS = {
 def resolve_preconditioner(spec):
     """Normalize a ``preconditioner=`` argument to a preconditioner object.
 
-    ``None`` -> the LU default; a string -> the registered class; a dict ->
-    :class:`RawOptions`; an object with a callable ``parameters`` -> itself.
+    ``None`` gives the LU default, a string names a registered class, a dict
+    becomes :class:`RawOptions`, and an object with a callable ``parameters``
+    is returned unchanged; anything else raises ``TypeError``.
     """
     if spec is None:
         return DirectFactorization()

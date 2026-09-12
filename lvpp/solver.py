@@ -1,31 +1,28 @@
 """Latent variable proximal point (LVPP) solver.
 
-LVPP (Dokken, Farrell, Keith, Papadopoulos, Surowiec, "The latent variable
-proximal point algorithm for variational problems with inequality
-constraints", arXiv:2503.05672) solves variational problems with pointwise
-inequality constraints ``Bu(x) in C(x)`` by giving each constrained unknown a
-latent variable ``psi`` and iterating the mixed proximal system (paper eq.
-2.7).  At proximal iteration ``k`` one (semismooth) Newton solve of
+LVPP (Dokken, Farrell, Keith, Papadopoulos, & Surowiec (2025)) solves
+variational problems with pointwise inequality constraints ``B u(x) in C(x)``
+by giving each constrained unknown a latent variable ``psi`` and iterating the
+mixed proximal system (2.7a)-(2.7b) of the paper.  At proximal iteration ``k``
+one (semismooth) Newton solve of
 
     alpha_k <J'(u^k), v> + (psi^k, Bv) - (psi^{k-1}, Bv) = 0   for all v   (2.7a)
-    (Bu^k, w) - (grad R*(psi^k), w)                      = 0   for all w   (2.7b)
+    (B u^k, w) - (grad R*(psi^k), w)                      = 0   for all w   (2.7b)
 
-is done, starting from ``psi^0 = 0``, until the stopping rule fires.  The
-reconstruction ``grad R*(psi^k)`` lies in the interior of ``C(x)`` for every
-``psi``, so the bound-preserving output ``u_tilde`` is feasible pointwise by
-construction for any alpha; convergence does NOT need ``alpha -> inf``.
+is done, starting from ``psi^0 = 0``, until the stopping rule fires.  Because
+``grad R*(psi)`` lies in the interior of the admissible set for every ``psi``,
+the reconstruction ``u_tilde = grad R*(psi^k)`` is feasible pointwise by
+construction whatever alpha is, so convergence does not need ``alpha -> inf``.
 
-This class is the *loop*: it owns the proximal iteration, the schedule, the
-stopping rule, the SNES, and the diagnostics.  Structure (spaces, weak form,
-Jacobians) lives in :mod:`lvpp.assembly`; how the Newton systems are
+This class is the loop: it owns the proximal iteration, the schedule, the
+stopping rule, the SNES, and the diagnostics.  The structure -- spaces, weak
+form, Jacobians -- lives in :mod:`lvpp.assembly`; how the Newton systems are
 approximately factored lives in :mod:`lvpp.preconditioners`; the alpha
-schedules live in :mod:`lvpp.schedules`.
+schedules and the stopping rules live in :mod:`lvpp.schedules`.
 
-Solver-parameter precedence
----------------------------
-``DEFAULT_SOLVER_PARAMETERS`` < ``preconditioner.parameters()`` < the user's
-``solver_parameters``.  A user dict therefore always wins, and swapping
-preconditioners never silently overrides an explicit choice.
+A user ``solver_parameters`` dict always wins over a preconditioner's
+``parameters()``, which in turn wins over :data:`DEFAULT_SOLVER_PARAMETERS`, so
+swapping preconditioners never silently overrides an explicit choice.
 """
 
 import warnings
@@ -68,76 +65,111 @@ class LVPPConvergenceError(RuntimeError):
 
 
 class LVPP:
-    """Latent variable proximal point solver for one variational problem.
+    """An LVPP object solves one variational problem with pointwise inequality
+    constraints by the latent variable proximal point algorithm of Dokken,
+    Farrell, Keith, Papadopoulos, & Surowiec (2025).
 
-    Parameters
-    ----------
-    energy : ufl.Form
-        Scalar 0-form in the user unknown(s).  Exactly one of ``energy`` and
-        ``residual`` must be given.
-    residual : ufl.Form or list of ufl.Form
-        Weak 1-form(s).  Either one form per unknown (test function on that
-        unknown's space), one single form whose test function lives on a
-        MixedFunctionSpace with one subspace per unknown (in the same order as
-        ``u``), or -- for a single unknown -- one form on its space.
-    u : Function or list of Function
-        Unknowns; their current values are the initial data for ``solve``.
-        The same Function object must not appear twice.
-    bounds : None | Constraint | (lower, upper) | list per unknown
-        Per unknown: ``None`` (unconstrained), a ``(lower, upper)`` pair with
-        either side possibly ``None`` (built into a
-        :class:`~lvpp.constraints.BoxConstraint`), a
-        :class:`~lvpp.constraints.Constraint` instance, or a list of
-        Constraint instances (several constraints may act on the same
-        unknown).  A bare pair or Constraint is accepted for one unknown.
-    bcs : DirichletBC or list
-        Essential boundary conditions on (a subspace of) the unknown spaces.
-    latent_spaces : list of FunctionSpace or None
-        Optional per-unknown override of the latent space; ``None`` entries
-        use ``constraint.latent_space(V)`` (a copy of V for box constraints).
-    preconditioner : None | str | dict | SaddlePreconditioner
-        How the Newton system is approximately factored.  ``None`` is direct
-        LU/MUMPS; ``"schur"`` is the floorless Schur fieldsplit; a dict is
-        raw PETSc options; an object with ``parameters()`` is used as-is.
-        See :mod:`lvpp.preconditioners`.
-    alpha_schedule : str or callable
-        One of :data:`lvpp.schedules.ALPHA_RULE_DEFAULTS` or a callable
-        ``f(k, alpha_prev, newton_its) -> alpha``.
-    alpha_parameters : dict
-        Overrides of the selected schedule's default parameters.
-    stopping : StoppingRule or None
-        Defaults to ``PrimalIncrement(tol)`` built from ``solve(tol=...)``.
-    solver_parameters, form_compiler_parameters, options_prefix :
-        Forwarded to :class:`firedrake.NonlinearVariationalSolver` /
-        ``NonlinearVariationalProblem``.  ``solver_parameters`` is merged over
-        :data:`DEFAULT_SOLVER_PARAMETERS` and the preconditioner's options.
-    increment_norm : "L2" or "H1"
-        Norm for the primal/latent increments reported by ``solve``.
-    on_newton_failure : "raise" or "reduce_alpha"
-        Newton failure handling: re-raise, or restore the previous iterate,
-        halve alpha, and retry the same proximal iteration (at most
-        ``_MAX_ALPHA_HALVINGS`` times per iteration; at most
-        ``max_consecutive_failures`` consecutive failed iterations overall).
+    Central notions behind this class:
+      * Each constrained unknown ``u`` is paired with a latent variable
+        ``psi`` on its own (often much lower-dimensional) space ``W``.  The
+        admissible set is the image of a concave ``R*``, and the problem is
+        solved through the mixed proximal system (2.7a)-(2.7b) of the paper: a
+        primal row from the user's energy or residual, shifted by the proximal
+        term ``(psi^k - psi^{k-1}, B v)``, and a state row ``(B u^k, w) -
+        (grad R*(psi^k), w)`` that drives the latent variable to the point
+        where its reconstruction matches the constrained unknown.
+      * ``grad R*(psi)`` lies in the interior of the admissible set for every
+        ``psi``, so the reconstruction ``u_tilde = grad R*(psi^k)`` is feasible
+        pointwise by construction, and the iteration needs no
+        ``alpha -> inf`` to produce an admissible answer.
+      * The proximal parameter ``alpha_k`` follows a schedule from
+        :mod:`lvpp.schedules`; the default double-exponential rule is eq.
+        (3.8) of the paper, and the proximal iteration count it produces is
+        mesh independent on the benchmark problems.
+      * On a contact set the latent variable drifts to -infinity at the rate
+        ``alpha * lambda`` per iteration, ``lambda`` being the multiplier
+        there, so the entropy Jacobian rows degenerate once ``|psi|`` nears
+        float saturation.  Terminate early enough (a moderate ``tol``), keep
+        ``alpha_max`` modest for such problems, or stabilize Newton through a
+        preconditioner-side correction (see
+        :class:`~lvpp.preconditioners.DegeneracyFloor`); very tight bounds with
+        strong forcing may also need ``on_newton_failure="reduce_alpha"``.
 
-    Note
-    ----
-    For solutions that sit exactly on a bound over extended regions the latent
-    variable psi drifts to -infinity (logarithmically, at the rate
-    ``alpha * lambda`` per proximal iteration) and the entropy Jacobian rows
-    degenerate once |psi| nears float saturation.  Terminate early enough
-    (moderate ``tol``), keep ``alpha_max`` modest for such problems, or
-    stabilize Newton through a preconditioner-side correction (see
-    :class:`~lvpp.preconditioners.DegeneracyFloor`); very tight bounds with
-    strong forcing may need ``on_newton_failure="reduce_alpha"``.
+    Regarding the arguments: exactly one of ``energy`` (a scalar 0-form) and
+    ``residual`` (weak 1-form(s)) is given, the latter either as one form per
+    unknown, one single form whose test function lives on a MixedFunctionSpace
+    with one subspace per unknown in the order of ``u``, or -- for a single
+    unknown -- one form on its space.  ``u`` is the unknown or list of unknowns
+    whose current values are the initial data for solve(), and the same
+    Function must not appear twice.  ``bounds`` says, per unknown, ``None``
+    (unconstrained), a ``(lower, upper)`` pair with either side possibly
+    ``None`` (built into a :class:`~lvpp.constraints.BoxConstraint`), a
+    :class:`~lvpp.constraints.Constraint`, or a list of constraints acting on
+    that unknown; a bare pair or Constraint is accepted for one unknown.
+    ``bcs`` holds essential boundary conditions on (subspaces of) the unknown
+    spaces, and ``latent_spaces`` optionally overrides the
+    constraint-provided latent space per unknown (``None`` entries use
+    ``constraint.latent_space(V)``, a copy of ``V`` for box constraints).
+    ``preconditioner`` says how the Newton system is approximately factored:
+    ``None`` is direct LU/MUMPS, ``"schur"`` is the floorless Schur fieldsplit,
+    a dict is raw PETSc options, and an object with ``parameters()`` is used as
+    it stands (see :mod:`lvpp.preconditioners`).  ``solver_parameters``,
+    ``form_compiler_parameters``, and ``options_prefix`` go to
+    :class:`firedrake.NonlinearVariationalSolver`, with ``solver_parameters``
+    merged over :data:`DEFAULT_SOLVER_PARAMETERS` and the preconditioner's
+    options.  ``alpha_schedule`` and ``alpha_parameters`` select and tune the
+    step-size rule, either a name from
+    :data:`lvpp.schedules.ALPHA_RULE_DEFAULTS` or a callable
+    ``f(k, alpha_prev, newton_its) -> alpha``, and ``stopping`` replaces the
+    ``PrimalIncrement(tol)`` built from the ``tol`` of solve();
+    ``increment_norm`` ("L2" or "H1") sets the norm in which the primal and
+    latent increments are reported.
+    ``on_newton_failure`` is "raise" or "reduce_alpha": the latter restores the
+    previous iterate, halves alpha, and retries the same proximal iteration, at
+    most ``_MAX_ALPHA_HALVINGS`` times per iteration and at most
+    ``max_consecutive_failures`` consecutive failed iterations overall.
 
-    Deprecated keyword arguments
-    ----------------------------
-    ``psi_spaces`` (use ``latent_spaces``), ``alpha_rule`` (use
-    ``alpha_schedule``), and ``psi_floor`` / ``psi_floor_drift`` /
-    ``psi_floor_operator`` / ``jacobian_regularization`` (use a
-    preconditioner).  These are kept so the recorded experiments in
-    ``lvpp/experiments/`` remain executable; see the compatibility block at
-    the end of this module.
+    The public API of the LVPP class is:
+
+      solve():  run the proximal iteration and return self
+
+      matrix():  assemble the true Jacobian ``J`` at the current iterate, with the Jp-only corrections left out
+
+      install_monitor():  attach a KSP monitor to the outer Krylov solver
+
+      energy(), feasibility(), complementarity(), dual_feasibility():  diagnostics of the current iterate, each vanishing or minimal at the solution
+
+      close():  release the preconditioner's PETSc objects
+
+    The properties ``snes``, ``ksp``, and ``pc`` expose the PETSc objects of
+    the nonlinear solve, while ``constraints``, ``primal_spaces``,
+    ``latent_spaces``, and ``bcs`` expose the assembled problem data.  After a
+    solve the results sit on ``z`` (the mixed unknown) and on the live
+    subfunction views ``u_out`` and ``psi_out``, with the pointwise feasible
+    reconstructions on ``u_tilde``; ``alpha_constant`` is the live proximal
+    parameter, ``drift`` holds the discrete multipliers, and ``history``
+    together with ``alpha_history``, ``newton_iterations``,
+    ``proximal_iterations``, ``alpha``, and ``stopping_description`` records
+    the run.
+
+    A typical obstacle problem, minimizing an energy subject to ``u >= psi``:
+
+    .. code-block:: python3
+
+      u = Function(V, name="u")
+      solver = LVPP(energy=energy, u=u, bounds=(psi, None),
+                    alpha_schedule="linear",
+                    alpha_parameters={"alpha0": 2**-7, "c": sqrt(2), "C_max": 2**-3})
+      solver.solve(tol=1e-8, max_proximal_iterations=100)
+      u_tilde = solver.u_tilde[0]        # pointwise feasible reconstruction
+
+    The earlier keyword spellings are also accepted: ``psi_spaces`` for
+    ``latent_spaces``, ``alpha_rule`` for ``alpha_schedule``, and
+    ``psi_floor`` / ``psi_floor_drift`` / ``psi_floor_operator`` /
+    ``jacobian_regularization`` for a preconditioner-side correction (the first
+    three select ``preconditioner=DegeneracyFloor(...)``).  Each emits a
+    DeprecationWarning, and the scripts in ``lvpp/experiments/`` still call
+    them.
     """
 
     def __init__(self, energy=None, residual=None, u=None, bounds=None, bcs=None,
@@ -148,7 +180,7 @@ class LVPP:
                  options_prefix=None, increment_norm="L2",
                  on_newton_failure="raise", max_consecutive_failures=50,
                  verbose=True, name="lvpp",
-                 # --- deprecated aliases (see the class docstring) ---------
+                 # --- earlier spellings, also accepted (see the class docstring)
                  psi_spaces=None, alpha_rule=None,
                  psi_floor=0.0, psi_floor_drift=0.0, psi_floor_operator=False,
                  jacobian_regularization=None, **kwargs):
@@ -157,7 +189,7 @@ class LVPP:
         if on_newton_failure not in ("raise", "reduce_alpha"):
             raise ValueError("on_newton_failure must be 'raise' or 'reduce_alpha'")
 
-        # --- deprecated aliases ---------------------------------------------
+        # --- earlier spellings ----------------------------------------------
         if psi_spaces is not None:
             if latent_spaces is not None:
                 raise TypeError("pass either psi_spaces= (deprecated) or latent_spaces=, not both")
@@ -215,10 +247,10 @@ class LVPP:
         J_eff = sys.J
         op_corr = self.preconditioner.operator_correction(self._view)
         if op_corr is not None:
-            # Legacy diagnostic (DegeneracyFloor(on_operator=True)): the floor
-            # is added to the operator itself.  Reproduces the recorded
-            # negative result; the original also discarded any
-            # jacobian_regularization in this branch, which we preserve.
+            # DegeneracyFloor(on_operator=True): the floor lands on the
+            # operator itself rather than on Jp, which reproduces the recorded
+            # negative result; a jacobian_regularization passed alongside is
+            # not applied in this branch.
             J_eff = sys.J + op_corr
             Jp = J_eff
         else:
@@ -261,7 +293,8 @@ class LVPP:
         self.history = {}
         self.stopping_description = "default"
 
-        # --- back-compat aliases (frozen experiments read these) -------------
+        # --- private handles onto the same state, read by the scripts in
+        # --- lvpp/experiments/ ----------------------------------------------
         self._z = sys.z
         self._Z = sys.Z
         self._alpha = sys.alpha
@@ -330,11 +363,10 @@ class LVPP:
         return self._bcs
 
     def matrix(self, mat_type="aij"):
-        """Assemble the TRUE Jacobian ``J`` at the current iterate.
-
-        ``psi_floor``-style corrections are Jp-only, so this is the unfloored
-        operator (the recorded experiments rely on that).
-        """
+        """Assemble the true Jacobian ``J`` of the mixed system (2.7a)-(2.7b) at
+        the current iterate.  The preconditioner corrections land on ``Jp``
+        only, so this returns the operator the residual actually
+        differentiates, which is what the recorded scripts inspect."""
         return assemble(self._system.J, mat_type=mat_type, bcs=self._system.bcs)
 
     def install_monitor(self, fn):
@@ -346,22 +378,27 @@ class LVPP:
     def solve(self, tol=1e-8, max_proximal_iterations=100, warm_start=False):
         """Run the proximal iteration until the stopping rule fires.
 
-        Resets the state from the user's initial data (latent variables zero
-        unless ``warm_start``), then iterates: pick alpha, back up z,
-        Newton-solve the mixed system, update diagnostics, shift
-        psi_prev/u_prev.  Raises :class:`LVPPConvergenceError` if Newton keeps
-        failing (see ``on_newton_failure``) or ``max_proximal_iterations`` is
-        exhausted.  Returns ``self``; results are on ``self.z`` (mixed),
-        ``self.u_out`` / ``self.psi_out`` (live subfunction views),
-        ``self.u_tilde`` (bound-preserving reconstructions), plus
-        ``self.history`` and the iteration counters.
+        Resets the state from the user's initial data -- the latent blocks to
+        zero unless ``warm_start`` -- and then repeats the paper's loop: pick
+        ``alpha_k`` from the schedule, back up the mixed iterate, take one
+        Newton solve of (2.7a)-(2.7b), refresh the reconstructions and the
+        diagnostics, capture the drift, and shift ``psi_prev`` and ``u_prev``.
+        ``tol`` builds the default ``PrimalIncrement`` stopping rule when the
+        constructor was given no ``stopping``.  Raises
+        :class:`LVPPConvergenceError` if Newton keeps failing (see
+        ``on_newton_failure``) or ``max_proximal_iterations`` is exhausted.
 
-        warm_start : bool
-            If True, keep the current latent block and carry it into the
-            proximal shift psi_prev instead of resetting both to zero.  Seed
-            the latent block beforehand via ``lvpp.psi_out[j].assign(...)``
-            (e.g. prolonged from a previous mesh level in an adaptive loop);
-            the primal block is always reset from the user's ``u``.
+        Returns ``self``.  The results sit on ``self.z`` (the mixed unknown),
+        ``self.u_out`` and ``self.psi_out`` (live subfunction views),
+        ``self.u_tilde`` (the pointwise feasible reconstructions), and in
+        ``self.history`` with the iteration counters.
+
+        With ``warm_start=True`` the current latent block is kept and carried
+        into the proximal shift ``psi_prev`` instead of being reset to zero.
+        Seed the latent block beforehand through
+        ``lvpp.psi_out[j].assign(...)``, for instance by prolonging it from a
+        previous mesh level in an adaptive loop; the primal block is always
+        reset from the user's ``u``.
         """
         self._pending_tol = tol
         self._max_proximal_iterations = max_proximal_iterations
@@ -407,6 +444,16 @@ class LVPP:
     # -------------------------------------------------------- loop internals
 
     def _initialise(self, warm_start):
+        """Reset the mixed iterate and the history for a fresh solve.
+
+        The primal blocks take the user's current ``u``, and ``u_prev`` is set
+        to the same values so the first primal increment is measured from the
+        initial data.  The latent blocks go to zero -- the paper's ``psi^0 =
+        0`` -- unless ``warm_start``, in which case the seeded latent block is
+        carried into the proximal shift so the first subproblem continues the
+        previous level's solution.  The default stopping rule is built here
+        from ``tol``.
+        """
         spec = self.spec
         sys = self._system
         n = spec.n_unknowns
@@ -442,7 +489,12 @@ class LVPP:
                             f"max_proximal_iterations={self._max_proximal_iterations}")
 
     def _newton_iteration(self, k, alpha):
-        """One SNES solve with the ``reduce_alpha`` retry ladder."""
+        """One SNES solve of (2.7a)-(2.7b) with the ``reduce_alpha`` retry loop.
+
+        On a ConvergenceError the previous iterate is restored, alpha is
+        halved, and the same proximal iteration is attempted again, within the
+        halving and consecutive-failure budgets.
+        """
         halvings = 0
         while True:
             try:
@@ -470,9 +522,18 @@ class LVPP:
                         f"alpha={alpha:.6e}")
 
     def _system_newton_its(self):
+        """The Newton iteration count of the most recent SNES solve, which a
+        NewtonAdaptive schedule consumes on the next proximal step."""
         return self._solver.snes.getIterationNumber()
 
     def _record_diagnostics(self, k, alpha, newton_its):
+        """Append this iteration's diagnostics to the history and print the
+        verbose line.
+
+        The primal and latent increments are what the stopping rules inspect;
+        the feasibility, complementarity, and dual-feasibility values are the
+        VI diagnostics, all of which vanish at the solution.
+        """
         sys = self._system
         history = self.history
         pinc = sys.primal_increment()
@@ -498,6 +559,8 @@ class LVPP:
     # ------------------------------------------------- post-solve diagnostics
 
     def _require_solved(self):
+        """Raise if solve() has not run yet, so the post-solve diagnostics
+        cannot report uninitialised state."""
         if self.alpha is None:
             raise RuntimeError("call solve() before requesting diagnostics")
 
@@ -531,5 +594,7 @@ class LVPP:
 
 
 def _resolve_schedule(alpha_schedule, alpha_parameters):
+    """Resolve the user's schedule into a callable and its verbose-line
+    description."""
     schedule = make_schedule(alpha_schedule, alpha_parameters)
     return schedule, describe(schedule)

@@ -1,16 +1,24 @@
-"""Self-check for lvpp.hpg.spaces (rewrite batch: meshes + hpG spaces).
+"""Self-check for :mod:`lvpp.hpg.spaces`: meshes, hpG spaces and refusals.
 
-Run with the env guard:
-
-  PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
-  OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
-  lvpp/experiments/rewrite_checks/check_hpg_spaces.py
+:class:`HPGDiscretization` pairs the primal ``CG_p`` space with a latent
+discontinuous spectral space of degree ``p - 2``, the pair used by the hpG
+solver, and can grade the mesh along one axis.  The expected dimensions below
+are those of that pair; the 21.8 grading is the request of the first graded
+level (64 cells per axis, ``g4``) of the hpG results in
+``experiments/hpg/RESULTS.md``.
 
 Checks
   (a) dims of ``CG_p x DQ_{p-2}`` on the 16x16 quad mesh, p = 2 and 4;
   (b) the graded mesh: measured hmax/hmin within 5% of the requested 21.8,
       every cell a quadrilateral, band exactly the uniform fine block;
-  (c) the 1D (interval) and 3D (hexahedral) builders.
+  (c) the 1D (interval) and 3D (hexahedral) builders;
+  (d) the documented refusals: simplex mesh, p < 2, unreachable grading.
+
+Run from the repository root with the env guard:
+
+  PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
+  OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
+  experiments/checks/check_hpg_spaces.py
 """
 
 import numpy as np

@@ -1,14 +1,26 @@
-"""Self-check for lvpp.preconditioners.
+"""Self-check for :mod:`lvpp.preconditioners`.
 
-(a) prints parameters() for DirectFactorization / SchurFieldsplit(±gamg);
-(b) exercises resolve_preconditioner for None / name / dict / instance / bad name;
-(c) assembles the DegeneracyFloor correction on a real mixed quad problem and
-    checks its block structure against eps * mass matrix.
+(a) prints ``parameters()`` for :class:`DirectFactorization` and
+    :class:`SchurFieldsplit`, with and without the AMG option on the (0,0)
+    block, and checks the option dicts: preonly + MUMPS-LU by default; schur
+    type, upper factorization, ``use_amat=False``, self-preconditioned Schur
+    complement; outer GMRES at rtol 1e-6 restarting every 250; no
+    ``psi_floor`` entry; and the AMG variant differing from the base dict on
+    the (0,0) block only.
+(b) exercises :func:`resolve_preconditioner` for None, a name, a raw option
+    dict, an instance and an unknown name.
+(c) assembles the degeneracy floor on a real mixed quadrilateral problem and
+    checks its block structure against ``eps * mass``: the correction touches
+    the latent block only and never Jp, ``eps`` is
+    ``constant + drift * alpha * |lambda|``, and the ``on_operator`` variant
+    hands the same form back for the operator.  The Jp-only rule behind this
+    is ``RESEARCH.md`` Finding 1.
 
-Run:
+Run from the repository root:
+
   PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
   OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
-  lvpp/experiments/rewrite_checks/check_preconditioners.py
+  experiments/checks/check_preconditioners.py
 """
 
 import numpy as np

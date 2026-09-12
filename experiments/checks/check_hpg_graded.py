@@ -1,23 +1,28 @@
-"""Phase-3 gate: the hpG graded chain must stay clean at extreme grading.
+"""The hpG two-stage solver on a strongly graded chain.
 
-``RESULTS.md`` records the *same* hpG two-stage solver converging without
-divergence on a 2D graded chain out to 226x grading / 25.7k dofs, where the P1
-Schur-fieldsplit configuration diverged (``ksp=-5`` at 14.2k).  This check
-re-runs that chain through the promoted ``lvpp.hpg`` modules.
+``experiments/hpg/RESULTS.md`` reports the hpG two-stage solver converging
+without divergence on a 2D graded chain out to 226x grading and 25.7k dofs,
+where the P1 Schur-fieldsplit configuration diverged (``ksp=-5`` at 14.2k).
+This script re-runs that chain through :mod:`lvpp.hpg`.
 
-Note on the meshes: the archive's ``graded_quad(n, ratio)`` produced meshes
-measuring ~1.21x the ratio it was asked for, so its recorded chain is
-``(64, 21.8) -> 26.41x``, ``(80, 45.3) -> 55.33x``, ``(96, 93.5) -> 114.78x``,
-``(112, 187.0) -> 226.06x``.  :meth:`HPGDiscretization.graded` calibrates the
-growth so the *measured* ratio equals the requested one, so the recorded
-grade strengths are passed directly below.  The meshes therefore differ
-slightly from the archive's (same band, ~10% weaker chains), so the gate is
-*no divergence with bounded iterations*, not digit-identical counts; the
-recorded counts are printed alongside.
+Note on the meshes: the older ``graded_quad(n, ratio)`` in
+``experiments/hpg/`` produced meshes measuring ~1.21x the ratio it was asked
+for, so its recorded chain is ``(64, 21.8) -> 26.41x``, ``(80, 45.3) ->
+55.33x``, ``(96, 93.5) -> 114.78x``, ``(112, 187.0) -> 226.06x``.
+:meth:`HPGDiscretization.graded` calibrates the growth so the *measured* ratio
+equals the requested one, so the recorded grade strengths are passed directly
+below.  The meshes therefore differ slightly from the older ones (same band,
+~10% weaker chains), so what is checked is *no divergence with bounded
+iterations*, not digit-identical counts; the recorded counts are printed
+alongside and must not blow up (proximal iterations <= 20, outer Krylov <= 10,
+err(u_h) < 1e-3, measured grading within 1% of the request).
 
-Run (optionally with a subset of levels, e.g. ``g4 g5``):
-    PETSC_DIR=... PETSC_ARCH=arch-firedrake-default OMP_NUM_THREADS=1 \
-        python experiments/rewrite_checks/check_hpg_graded.py [g4 g5 g6 g7]
+Run from the repository root (optionally with a subset of levels, e.g. ``g4
+g5``):
+
+    PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
+    OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
+    experiments/checks/check_hpg_graded.py [g4 g5 g6 g7]
 """
 
 import sys

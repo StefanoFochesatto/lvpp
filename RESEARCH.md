@@ -44,27 +44,20 @@ inside); script paths in this document read `experiments/<name>.py` →
 | LVPP solver class | `lvpp/lvpp/solver.py`, class `LVPP` (proximal loop, diagnostics, public handles) |
 | alpha schedules / stopping rules | `lvpp/lvpp/schedules.py` (`AlphaSchedule`, `PrimalIncrement`, `AlphaPlateau`) |
 | mixed weak form, Jacobians, diagnostic forms | `lvpp/lvpp/assembly.py` (`ProblemSpec`, `MixedSystem`: F, J, `jacobian_with`) |
-| preconditioner seam | `lvpp/lvpp/preconditioners/base.py` (`SaddleView`, `SaddlePreconditioner`); implementations `direct.py` / `floor.py` / `schur.py` |
+| preconditioner interface | `lvpp/lvpp/preconditioners/base.py` (`SaddleView`, `SaddlePreconditioner`); implementations `direct.py` / `floor.py` / `schur.py` |
 | Jp (preconditioner-Jacobian) construction | `LVPP.__init__` via `preconditioner.jacobian_correction(view)`; floors live in `preconditioners/floor.py` |
 | proximal drift = discrete multiplier | `LVPP.drift` (per-accepted-iterate `(psi_prev - psi)/alpha`), captured before the psi_prev shift |
 | Legendre families | `lvpp/lvpp/legendre.py` (ShannonLower/Upper, FermiDirac, Hellinger, GibbsSimplex) |
 | Constraint interface | `lvpp/lvpp/constraints.py` (`Constraint`, `BoxConstraint`; `coupling_form`/`state_form`/`observable` = the family-generic surface) |
 | hpG (hierarchical PG) | `lvpp/lvpp/hpg/` (`HPG` preset, `HPGDiscretization`, `SpectralGalerkin`, `HPGTwoStage`) |
 | shared benchmark data | `lvpp/lvpp/benchmarks.py` (sphere obstacle + recorded P1/Schur reference tables) |
-| rewrite gates | `lvpp/experiments/rewrite_checks/` (each script's docstring names the recorded numbers it pins) |
+| the checks | `lvpp/experiments/checks/` (each script's docstring names the recorded numbers it verifies) |
 | NSV03 with dual injection | `viamr/viamr/viamr.py`, `nsv03mark(..., dual=None)` (~line 1045; injection branch ~1153; per-term debug print behind `VIAMR(debug=True)`) |
 | NSV05 (no dual injection; see F3) | `viamr/viamr/viamr.py`, `nsv05mark` (~1375) |
 | method sweep + saddle estimator | `viamr/examples/sphere_lvpp.py` (`saddle_estimator`, `-methods uni,udobr,nsv03,saddle`) |
 | adaptive single-run draft | superseded by the sweep; kept in git history of `viamr/examples/sphere_lvpp.py` |
 | uniform study (reference config) | `lvpp/examples/sphere_lvpp.py` |
 | matrix-free experiment | `experiments/archive_2026-09/matfree_fieldsplit.py` |
-
-**Note (readability rewrite).**  The monolithic `lvpp/lvpp/lvpp.py` was split
-into `solver.py` / `assembly.py` / `schedules.py` / `preconditioners/` and
-deleted; it remains at `git show main:lvpp/lvpp.py`, and every deprecated
-keyword argument and private attribute listed in this document still works as
-an alias (see `README.md` §Compatibility), so the paths above that reach into
-`LVPP` supercede, not break, this table's older entries.
 
 Solver configuration that works everywhere (uniform study, sweeps):
 `snes_rtol 1e-6`, l2 line search (`maxlambda 1.0`), `alpha_max 10`,

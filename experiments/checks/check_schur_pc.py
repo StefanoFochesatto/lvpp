@@ -1,18 +1,29 @@
-"""Phase-2 gate: the rewritten preconditioner seam reproduces the recorded
-floorless Schur-fieldsplit numbers on the sphere benchmark.
+"""Schur-fieldsplit runs of the sphere benchmark.
 
-Expected (``RESEARCH.md`` Finding 6 "RESOLVED" + ``lvpp/lvpp/benchmarks.py``):
-per level, (prox, newton, err(u_h), max outer-GMRES its) =
-L0 (8, 21, 1.553e-2, 14), L1 (11, 23, 3.599e-3, 29), L2 (8, 19, 8.375e-4, 48).
+Solves the obstacle problem with the pointwise lower bound psi(r) on the three
+uniform refinements of the crossed square mesh and compares the quantities
+produced by :class:`lvpp.preconditioners.SchurFieldsplit` -- proximal
+iterations, Newton iterations, err(u_h) and the largest outer-GMRES iteration
+count -- with the floorless numbers of Finding 6 ("RESOLVED") in
+``RESEARCH.md``, which ``lvpp.benchmarks`` stores as ``LU_REFS_P1`` (dofs,
+proximal, Newton, error) and ``SCHUR_OUTER_REFS`` (outer Krylov iterations).
+Per level, (prox, newton, err(u_h), max outer-GMRES its) = L0 (8, 21, 1.553e-2,
+14), L1 (11, 23, 3.599e-3, 29), L2 (8, 19, 8.375e-4, 48).
 
-Before the rewrite this was driven by
-``LVPP(..., solver_parameters=SP_WINNER, psi_floor=0.0)``; now it is
-``preconditioner="schur"`` (the same option dict, owned by
-:class:`lvpp.preconditioners.SchurFieldsplit`).
+The option dict is the one owned by
+:class:`lvpp.preconditioners.SchurFieldsplit`, selected here with
+``preconditioner="schur"`` and no degeneracy floor (``psi_floor=0.0``).
 
-Run:
-    PETSC_DIR=... PETSC_ARCH=arch-firedrake-default OMP_NUM_THREADS=1 \
-        python experiments/rewrite_checks/check_schur_pc.py
+The reported errors carry four significant figures, so they are compared
+relatively at 5e-4; the counts must match exactly.
+
+Run from the repository root:
+
+    PETSC_DIR=/home/stefano/firedrake/petsc PETSC_ARCH=arch-firedrake-default \
+    OMP_NUM_THREADS=1 /home/stefano/firedrake/venv-firedrake/bin/python \
+    experiments/checks/check_schur_pc.py
+
+Prints one line per level, then ``SCHUR PC OK``; any mismatch exits non-zero.
 """
 
 import sys
