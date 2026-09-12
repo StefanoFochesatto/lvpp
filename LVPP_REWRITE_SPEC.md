@@ -919,6 +919,7 @@ as an alias, per §7.2).
 | hpG graded chain | `check_hpg_graded.py` | g4–g7 (26.4x→226.1x, to 12.5k cells): no divergence, outer flat at 2, inner 12–14/apply |
 | hpG spectral structure | `check_spectral.py` | 2D stage-0 numbers reproduced to the digit; `d=1` Ahat diagonal; `d=3` → 8 parity classes (the §6 inference, now measured) |
 | hpG discretization | `check_hpg_spaces.py` | dims, ratio calibration, `dim ∈ {1,2,3}`, rejections all pass |
+| hpG matfree arm | `check_hpg_matfree.py` | uniform: identical to the cached-LU arm (`8 / 22 / 1.1919e-3`, A-CG 14.7 its/call, 0 non-converged); graded 26.4x: converges (outer 2–3) with the A-CG saturating its cap (569/569 at `a_rtol=1e-8`; 60/602 at `1e-6`) |
 
 ### 14.2 Deviations from this spec (recorded)
 
@@ -948,3 +949,10 @@ as an alias, per §7.2).
    asserted.
 6. **`P_D` / `P_L P_D` remain unimplemented** (§5.3, §13.3 item 4). `P_F` is
    what the 2D benchmarks use; the 3D comparison is untouched.
+7. **The matfree arm is implemented** — `HPGTwoStage(a_action="gamg")` is
+   §5.3's `a_action` option, i.e. `matfree_hpG.py`'s CG+AMG replacement for the
+   cached factorization of the alpha-free `K0`.  It was the one piece of that
+   driver not covered by a committed gate; `check_hpg_matfree.py` now covers
+   it.  Its graded behaviour is *not* equal to the cached arm (§14.1), and the
+   gate reports the saturated A-CG rather than failing, because the outer
+   FGMRES is designed to absorb a variably-accurate `A^{-1}` — and does.

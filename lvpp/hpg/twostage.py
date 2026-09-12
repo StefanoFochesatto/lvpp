@@ -256,6 +256,9 @@ class HPGTwoStage(PreconditionerBase):
         # --- diagnostics ------------------------------------------------------
         self.inner_its = []
         self.a_its = []
+        self.a_calls = 0
+        self.a_nonconv = 0
+        self.a_maxits_seen = 0
         self.n_applies = 0
         self.bad = False
 
@@ -418,11 +421,21 @@ class HPGTwoStage(PreconditionerBase):
         self.n_applies += 1
 
     def _Ainv(self, b):
-        """``A(alpha)^-1 b = K0^-1 (D_alpha b)``."""
+        """``A(alpha)^-1 b = K0^-1 (D_alpha b)``.
+
+        For ``a_action="gamg"`` this is a *variable-accuracy* inner iteration
+        (the outer FGMRES tolerates that by design); ``a_its`` and
+        ``a_nonconv`` record its cost and whether it ever hit the cap.
+        """
         self._av.setArray(np.ascontiguousarray(b * self._scale))
         self._kspA.solve(self._av, self._ax)
+        self.a_calls += 1
         if self.a_action != "lu":
-            self.a_its.append(int(self._kspA.getIterationNumber()))
+            its = int(self._kspA.getIterationNumber())
+            self.a_its.append(its)
+            self.a_maxits_seen = max(self.a_maxits_seen, its)
+            if int(self._kspA.getConvergedReason()) < 0:
+                self.a_nonconv += 1
         return self._ax.getArray(readonly=True).copy()
 
     def _inner_solve(self, y_schur):

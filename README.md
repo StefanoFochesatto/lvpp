@@ -68,6 +68,28 @@ diagnostics (`feasibility()`, `complementarity()`, `dual_feasibility()`).
 (`HPGDiscretization.graded(n, p, ratio)`) and 1D/3D (`dim=1, 3`); hpG requires
 tensor-product cells (interval, quadrilateral, hexahedron).
 
+### The matfree A-action
+
+`HPGTwoStage` applies `A(alpha)^-1` either from a cached MUMPS factorization of
+the alpha-free `K0` (default, `a_action="lu"`) or, for the matfree arm of
+`experiments/hpg/matfree_hpG.py`, from a **capped CG + AMG solve on the same
+`K0`** — which removes every global factorization from the apply path (the
+cellwise `Shat` Cholesky and the preconditioner assembly are local and stay):
+
+    HPG(disc, u, bounds, preconditioner=HPGTwoStage(a_action="gamg"))
+
+Measured by `experiments/rewrite_checks/check_hpg_matfree.py`:
+
+* **uniform meshes: identical to the cached arm** — L0 p=2 gives prox 8,
+  newton 22, `err = 1.191910e-03` for both, with A-CG 14.7 its/call (max 16)
+  and zero non-converged solves;
+* **graded meshes: the A-solve saturates its cap** — on a 26.4x graded mesh, at
+  `a_rtol=1e-8` all 569 A-CG calls hit the 60-iteration cap; loosening to
+  `a_rtol=1e-6` leaves 60 of 602 saturated.  The outer FGMRES still converges
+  (2–3 its) and the result is close but not identical to the cached arm
+  (prox 10 vs 8, `err 1.03e-4` vs `9.9e-5`).  AMG on a strongly graded
+  stiffness matrix is simply weak here; `a_rtol` / `a_maxit` are the knobs.
+
 ## Layout
 
 | module | contents |
