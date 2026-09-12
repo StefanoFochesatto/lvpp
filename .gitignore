@@ -8,3 +8,5 @@ dist/
 *.vtu
 *.pvtu
 *.bp/
+chats/
+experiments/
